@@ -22,7 +22,16 @@ type Scheduler struct {
 	Interval  time.Duration
 	Now       func() time.Time
 
-	manual chan int64
+	manual chan refreshRequest
+}
+
+// refreshRequest is a manually queued refresh. done, if non-nil, is closed
+// once the scheduler's single refresh goroutine has processed it, letting a
+// caller block until it's actually run without breaking the invariant that
+// refreshes happen one at a time.
+type refreshRequest struct {
+	feedID int64
+	done   chan struct{}
 }
 
 // NewScheduler creates a Scheduler that checks for due feeds every interval.
@@ -32,17 +41,36 @@ func NewScheduler(feeds *db.FeedRepo, refresher *Refresher, interval time.Durati
 		Refresher: refresher,
 		Interval:  interval,
 		Now:       time.Now,
-		manual:    make(chan int64, 16),
+		manual:    make(chan refreshRequest, 16),
 	}
 }
 
 // TriggerRefresh queues an immediate, out-of-cycle refresh for a single feed
-// (used by manual "refresh now" and OPML import), without blocking the
-// caller. It is a no-op if the queue is full.
+// (used by OPML import), without blocking the caller. It is a no-op if the
+// queue is full.
 func (s *Scheduler) TriggerRefresh(feedID int64) {
 	select {
-	case s.manual <- feedID:
+	case s.manual <- refreshRequest{feedID: feedID}:
 	default:
+	}
+}
+
+// TriggerRefreshSync queues an immediate, out-of-cycle refresh for a single
+// feed (used by the UI's manual "refresh now" button) and blocks until the
+// scheduler has run it, so the caller can render the feed's post-refresh
+// state. It still goes through the same queue as TriggerRefresh, so it never
+// runs concurrently with a due-feed refresh. Returns early if ctx is
+// canceled before the refresh is queued or completes.
+func (s *Scheduler) TriggerRefreshSync(ctx context.Context, feedID int64) {
+	req := refreshRequest{feedID: feedID, done: make(chan struct{})}
+	select {
+	case s.manual <- req:
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-req.done:
+	case <-ctx.Done():
 	}
 }
 
@@ -61,8 +89,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case feedID := <-s.manual:
-			s.refreshOne(feedID)
+		case req := <-s.manual:
+			s.refreshOne(req.feedID)
+			if req.done != nil {
+				close(req.done)
+			}
 		case <-ticker.C:
 			s.refreshDue(ctx)
 		}

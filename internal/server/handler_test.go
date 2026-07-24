@@ -26,7 +26,7 @@ func newTestHandler(t *testing.T) (*Handler, *db.FeedRepo, *db.ArticleRepo) {
 
 	feeds := db.NewFeedRepo(sqlDB)
 	articles := db.NewArticleRepo(sqlDB)
-	return NewHandler(feeds, articles), feeds, articles
+	return NewHandler(feeds, articles, nil), feeds, articles
 }
 
 func TestHandleIndex_NoFeeds(t *testing.T) {
@@ -205,8 +205,8 @@ func TestPageResponses_HaveStrictCSP(t *testing.T) {
 	h.Routes().ServeHTTP(rec, req)
 
 	csp := rec.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "script-src 'none'") {
-		t.Errorf("expected script-src 'none' in page CSP, got: %q", csp)
+	if !strings.Contains(csp, "script-src 'self'") {
+		t.Errorf("expected script-src 'self' in page CSP, got: %q", csp)
 	}
 }
 
@@ -318,6 +318,137 @@ func TestStaticAssetsServed(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "grid-template-columns") {
 		t.Errorf("expected CSS content, got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleArticle_MarksReadOnView(t *testing.T) {
+	h, feeds, articles := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	a := &model.Article{FeedID: f.ID, Title: "Hello World"}
+	if err := articles.Create(a); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/feeds/"+itoa(f.ID)+"/articles/"+itoa(a.ID), nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got, err := articles.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if !got.Read {
+		t.Errorf("expected article to be marked read after viewing")
+	}
+}
+
+func TestHandleSetArticleRead_TogglesState(t *testing.T) {
+	h, feeds, articles := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	a := &model.Article{FeedID: f.ID, Title: "Hello World", Read: true}
+	if err := articles.Create(a); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/feeds/"+itoa(f.ID)+"/articles/"+itoa(a.ID)+"/read",
+		strings.NewReader("read=false"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	got, err := articles.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.Read {
+		t.Errorf("expected article to be marked unread")
+	}
+	if !strings.Contains(rec.Body.String(), "Mark read") {
+		t.Errorf("expected re-rendered fragment to offer 'Mark read', got: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "<!DOCTYPE") {
+		t.Errorf("expected HX-Request to receive a fragment without doctype, got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleMarkAllRead_MarksEveryArticle(t *testing.T) {
+	h, feeds, articles := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	a1 := &model.Article{FeedID: f.ID, Title: "One"}
+	a2 := &model.Article{FeedID: f.ID, Title: "Two"}
+	if err := articles.Create(a1); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := articles.Create(a2); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/feeds/"+itoa(f.ID)+"/mark-all-read", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	for _, id := range []int64{a1.ID, a2.ID} {
+		got, err := articles.Get(id)
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if !got.Read {
+			t.Errorf("expected article %d to be marked read", id)
+		}
+	}
+}
+
+func TestHandleRefreshFeed_NilSchedulerStillRenders(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/feeds/"+itoa(f.ID)+"/refresh", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "My Feed") {
+		t.Errorf("expected re-rendered feed page, got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleRefreshFeed_UnknownFeedReturns404(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/feeds/999/refresh", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
 

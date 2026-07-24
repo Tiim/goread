@@ -1,6 +1,12 @@
 {{define "article_list"}}
 {{if .SelectedFeed}}
-<h2 class="pane-heading">{{.SelectedFeed.Title}}</h2>
+<div class="pane-heading-row">
+  <h2 class="pane-heading">{{.SelectedFeed.Title}}</h2>
+  <button type="button" class="mark-all-read"
+    hx-post="/feeds/{{.SelectedFeed.ID}}/mark-all-read"
+    {{if .SelectedArticleID}}hx-vals='{"articleID": "{{.SelectedArticleID}}"}'{{end}}
+    >Mark all read</button>
+</div>
 {{if not .Articles}}
 <p class="empty">No articles.</p>
 {{end}}

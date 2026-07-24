@@ -56,7 +56,7 @@ func run() error {
 	}
 	log.Printf("GoRead listening on http://%s", ln.Addr())
 
-	handler := server.NewHandler(feeds, articles)
+	handler := server.NewHandler(feeds, articles, scheduler)
 	httpSrv := &http.Server{Handler: handler.Routes()}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

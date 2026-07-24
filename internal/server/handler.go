@@ -10,18 +10,20 @@ import (
 	"strconv"
 
 	"github.com/Tiim/goread/internal/db"
+	"github.com/Tiim/goread/internal/feed"
 	"github.com/Tiim/goread/internal/imageproxy"
 	"github.com/Tiim/goread/internal/model"
 	"github.com/Tiim/goread/internal/sanitize"
 )
 
-// pageCSP is applied to every full-page response. No JavaScript exists yet
-// (that lands in Phase 6 as HTMX), so script-src is disabled outright.
-// frame-src/img-src are scoped to 'self' since article content and images
-// are always served back through this same origin (see article content and
-// image-proxy handlers below), never fetched directly by the browser from a
-// third party, per docs/spec.md "Security".
-const pageCSP = "default-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; " +
+// pageCSP is applied to every full-page response. script-src is scoped to
+// 'self' so the vendored htmx.min.js (served from this origin) can run,
+// while still forbidding any inline/third-party script. frame-src/img-src
+// are scoped to 'self' since article content and images are always served
+// back through this same origin (see article content and image-proxy
+// handlers below), never fetched directly by the browser from a third
+// party, per docs/spec.md "Security".
+const pageCSP = "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; " +
 	"frame-src 'self'; img-src 'self'; style-src 'self'; form-action 'self'"
 
 // frameCSP is applied to the sandboxed article-content document rendered
@@ -37,15 +39,20 @@ type Handler struct {
 	articles  *db.ArticleRepo
 	templates *template.Template
 	images    *imageproxy.Client
+	scheduler *feed.Scheduler
 }
 
-// NewHandler builds a Handler backed by the given repositories.
-func NewHandler(feeds *db.FeedRepo, articles *db.ArticleRepo) *Handler {
+// NewHandler builds a Handler backed by the given repositories. scheduler
+// may be nil (e.g. in tests that don't exercise manual refresh), in which
+// case the manual refresh route is a no-op that just re-renders current
+// state.
+func NewHandler(feeds *db.FeedRepo, articles *db.ArticleRepo, scheduler *feed.Scheduler) *Handler {
 	return &Handler{
 		feeds:     feeds,
 		articles:  articles,
 		templates: parseTemplates(),
 		images:    imageproxy.New(),
+		scheduler: scheduler,
 	}
 }
 
@@ -57,6 +64,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /feeds/{id}", h.handleFeed)
 	mux.HandleFunc("GET /feeds/{id}/articles/{articleID}", h.handleArticle)
 	mux.HandleFunc("GET /feeds/{id}/articles/{articleID}/content", h.handleArticleFrame)
+	mux.HandleFunc("POST /feeds/{id}/articles/{articleID}/read", h.handleSetArticleRead)
+	mux.HandleFunc("POST /feeds/{id}/mark-all-read", h.handleMarkAllRead)
+	mux.HandleFunc("POST /feeds/{id}/refresh", h.handleRefreshFeed)
 	mux.HandleFunc("GET /proxy/image", h.handleImageProxy)
 	return withCSP(mux)
 }
@@ -105,7 +115,7 @@ func buildFolders(feeds []*model.Feed) []folderView {
 }
 
 func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
-	h.render(w, pageData{})
+	h.render(w, r, pageData{})
 }
 
 func (h *Handler) handleFeed(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +139,7 @@ func (h *Handler) handleFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.render(w, pageData{
+	h.render(w, r, pageData{
 		SelectedFeedID: feedID,
 		SelectedFeed:   feed,
 		Articles:       articles,
@@ -145,18 +155,21 @@ func (h *Handler) handleArticle(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	h.renderArticlePage(w, r, feedID, articleID, true)
+}
 
+// renderArticlePage loads a feed, its article list, and one selected article,
+// then renders the full page/fragment. When markRead is true and the
+// article isn't already read, it's marked read first (viewing an article is
+// the normal way a user marks it read; explicit toggling goes through
+// handleSetArticleRead with markRead=false so it isn't immediately
+// overridden here).
+func (h *Handler) renderArticlePage(w http.ResponseWriter, r *http.Request, feedID, articleID int64, markRead bool) {
 	feed, err := h.feeds.Get(feedID)
 	if errors.Is(err, db.ErrNotFound) {
 		http.NotFound(w, r)
 		return
 	} else if err != nil {
-		h.serverError(w, err)
-		return
-	}
-
-	articles, err := h.articles.ListByFeed(feedID)
-	if err != nil {
 		h.serverError(w, err)
 		return
 	}
@@ -174,12 +187,149 @@ func (h *Handler) handleArticle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.render(w, pageData{
+	if markRead && !article.Read {
+		if err := h.articles.SetRead(articleID, true); err != nil {
+			h.serverError(w, err)
+			return
+		}
+		article.Read = true
+	}
+
+	articles, err := h.articles.ListByFeed(feedID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	h.render(w, r, pageData{
 		SelectedFeedID:    feedID,
 		SelectedFeed:      feed,
 		Articles:          articles,
 		SelectedArticleID: articleID,
 		SelectedArticle:   article,
+	})
+}
+
+// handleSetArticleRead toggles a single article's read state (via the
+// "Mark read"/"Mark unread" button) and re-renders the article page.
+func (h *Handler) handleSetArticleRead(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	articleID, ok := parseID(w, r.PathValue("articleID"))
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	read := r.FormValue("read") == "true"
+
+	article, err := h.articles.Get(articleID)
+	if errors.Is(err, db.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	if article.FeedID != feedID {
+		http.NotFound(w, r)
+		return
+	}
+
+	if err := h.articles.SetRead(articleID, read); err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	h.renderArticlePage(w, r, feedID, articleID, false)
+}
+
+// handleMarkAllRead marks every article in a feed as read. If the request
+// carries an articleID (the currently open article, passed via hx-vals so
+// selection survives the update), that article's page is re-rendered;
+// otherwise the feed's article list is rendered with no selection.
+func (h *Handler) handleMarkAllRead(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	feed, err := h.feeds.Get(feedID)
+	if errors.Is(err, db.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	if err := h.articles.MarkAllReadForFeed(feedID); err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if raw := r.FormValue("articleID"); raw != "" {
+		if articleID, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			h.renderArticlePage(w, r, feedID, articleID, false)
+			return
+		}
+	}
+
+	articles, err := h.articles.ListByFeed(feedID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	h.render(w, r, pageData{
+		SelectedFeedID: feedID,
+		SelectedFeed:   feed,
+		Articles:       articles,
+	})
+}
+
+// handleRefreshFeed performs an immediate, synchronous refresh of a single
+// feed (the "refresh now" button) by routing through the scheduler's queue
+// so it never runs concurrently with a due-feed background refresh, then
+// re-renders the feed's page so any RefreshError or new articles show up
+// right away.
+func (h *Handler) handleRefreshFeed(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if _, err := h.feeds.Get(feedID); errors.Is(err, db.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	if h.scheduler != nil {
+		h.scheduler.TriggerRefreshSync(r.Context(), feedID)
+	}
+
+	feed, err := h.feeds.Get(feedID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	articles, err := h.articles.ListByFeed(feedID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	h.render(w, r, pageData{
+		SelectedFeedID: feedID,
+		SelectedFeed:   feed,
+		Articles:       articles,
 	})
 }
 
@@ -265,9 +415,11 @@ func (h *Handler) handleImageProxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// render fills in the feed tree (present on every page) and executes the
-// full three-pane layout template.
-func (h *Handler) render(w http.ResponseWriter, data pageData) {
+// render fills in the feed tree (present on every page) and executes either
+// the full page layout, or - for HTMX requests, which only ever swap the
+// #app div - just that fragment, saving the head/body boilerplate on every
+// partial update.
+func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) {
 	feeds, err := h.feeds.List()
 	if err != nil {
 		h.serverError(w, err)
@@ -275,8 +427,13 @@ func (h *Handler) render(w http.ResponseWriter, data pageData) {
 	}
 	data.Folders = buildFolders(feeds)
 
+	tmpl := "layout"
+	if r.Header.Get("HX-Request") == "true" {
+		tmpl = "app"
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.templates.ExecuteTemplate(w, "layout", data); err != nil {
+	if err := h.templates.ExecuteTemplate(w, tmpl, data); err != nil {
 		log.Printf("render template: %v", err)
 	}
 }

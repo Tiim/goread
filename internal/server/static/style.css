@@ -72,6 +72,17 @@ body {
   padding: 0;
 }
 
+.feed-item {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.feed-item a {
+  flex: 1;
+  min-width: 0;
+}
+
 .feed-item a,
 .article-item a {
   display: block;
@@ -85,6 +96,39 @@ body {
 .article-item.selected a {
   background: var(--accent);
   color: #fff;
+}
+
+.feed-error {
+  color: #c0392b;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.feed-refresh {
+  padding: 0.2rem 0.5rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.pane-heading-row,
+.article-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
 }
 
 .article-item.unread .article-title {

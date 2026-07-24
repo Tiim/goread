@@ -1,6 +1,12 @@
 {{define "article_content"}}
 {{if .SelectedArticle}}
-<h2 class="article-heading">{{.SelectedArticle.Title}}</h2>
+<div class="article-heading-row">
+  <h2 class="article-heading">{{.SelectedArticle.Title}}</h2>
+  <button type="button" class="mark-read-toggle"
+    hx-post="/feeds/{{.SelectedFeedID}}/articles/{{.SelectedArticleID}}/read"
+    hx-vals='{"read": "{{if .SelectedArticle.Read}}false{{else}}true{{end}}"}'
+    >{{if .SelectedArticle.Read}}Mark unread{{else}}Mark read{{end}}</button>
+</div>
 <p class="article-meta">
   {{if .SelectedArticle.Author}}<span class="article-author">{{.SelectedArticle.Author}}</span>{{end}}
   {{if .SelectedArticle.PublishedAt}}<span class="article-published">{{.SelectedArticle.PublishedAt.Format "Jan 2, 2006 15:04"}}</span>{{end}}
