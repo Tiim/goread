@@ -1,0 +1,4 @@
+/goread
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
