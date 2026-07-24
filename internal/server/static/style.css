@@ -118,9 +118,10 @@ body {
   gap: 0.75rem;
 }
 
-.article-body {
-  white-space: pre-wrap;
-  line-height: 1.5;
+.article-frame {
+  width: 100%;
+  height: calc(100vh - 8rem);
+  border: 0;
 }
 
 .empty {
