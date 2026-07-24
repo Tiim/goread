@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Tiim/goread/internal/appdir"
+	"github.com/Tiim/goread/internal/browser"
 	"github.com/Tiim/goread/internal/db"
 	"github.com/Tiim/goread/internal/feed"
 	"github.com/Tiim/goread/internal/server"
@@ -54,9 +56,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	log.Printf("GoRead listening on http://%s", ln.Addr())
+	url := fmt.Sprintf("http://%s", ln.Addr())
+	log.Printf("GoRead listening on %s", url)
 
-	handler := server.NewHandler(feeds, articles, scheduler)
+	go func() {
+		if err := browser.Open(url); err != nil {
+			log.Printf("open browser: %v", err)
+		}
+	}()
+
+	handler := server.NewHandler(feeds, articles, scheduler, sqlDB)
 	httpSrv := &http.Server{Handler: handler.Routes()}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

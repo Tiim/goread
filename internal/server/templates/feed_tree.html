@@ -6,13 +6,33 @@
   <button type="submit">Search</button>
 </form>
 
-<div class="opml-actions">
-  <a href="/opml/export">Export OPML</a>
-  <form class="opml-import-form" action="/opml/import" method="post" enctype="multipart/form-data">
-    <input type="file" name="file" accept=".opml,.xml" aria-label="Import OPML file">
-    <button type="submit">Import</button>
+<details class="tools-section"{{if .AddFeedError}} open{{end}}>
+  <summary>Add feed</summary>
+  <form class="stacked-form" action="/feeds" method="post">
+    <label>Feed URL
+      <input type="url" name="url" required value="{{.AddFeedURL}}" placeholder="https://example.com/feed.xml" aria-label="Feed URL to add">
+    </label>
+    <label>Folder <span class="field-hint">(optional)</span>
+      <input type="text" name="folder" value="{{.AddFeedFolder}}" aria-label="Folder for new feed">
+    </label>
+    <button type="submit">Add feed</button>
   </form>
-</div>
+  {{if .AddFeedError}}<p class="form-error" role="alert">{{.AddFeedError}}</p>{{end}}
+</details>
+
+<details class="tools-section">
+  <summary>Import / export</summary>
+  <div class="tools-actions">
+    <a href="/opml/export" hx-boost="false">Export OPML</a>
+    <a href="/backup" download hx-boost="false">Backup database</a>
+    <form class="stacked-form" action="/opml/import" method="post" enctype="multipart/form-data">
+      <label>Import OPML
+        <input type="file" name="file" accept=".opml,.xml" aria-label="Import OPML file">
+      </label>
+      <button type="submit">Import</button>
+    </form>
+  </div>
+</details>
 
 {{if not .Folders}}
 <p class="empty">No feeds yet.</p>
@@ -23,13 +43,19 @@
   <ul class="feed-list">
     {{range .Feeds}}
     <li class="feed-item{{if eq .ID $.SelectedFeedID}} selected{{end}}">
-      <a href="/feeds/{{.ID}}">
+      <a class="feed-link" href="/feeds/{{.ID}}"{{if eq .ID $.SelectedFeedID}} aria-current="page"{{end}}>
         {{if .Favicon}}<img class="feed-favicon" src="/feeds/{{.ID}}/favicon" alt="">{{end}}
         {{.Title}}
         {{if .RefreshError}}<span class="feed-error" role="img" aria-label="Refresh failed: {{.RefreshError}}" title="Refresh failed: {{.RefreshError}}">&#9888;</span>{{end}}
       </a>
-      <button type="button" class="feed-refresh" aria-label="Refresh {{.Title}} now"
-        hx-post="/feeds/{{.ID}}/refresh">&#8635;</button>
+      <div class="feed-item-actions">
+        <button type="button" class="feed-refresh" aria-label="Refresh {{.Title}} now"
+          hx-post="/feeds/{{.ID}}/refresh">&#8635;</button>
+        <a href="/feeds/{{.ID}}/edit" class="feed-edit" aria-label="Edit {{.Title}}">&#9998;</a>
+        <button type="button" class="feed-delete" aria-label="Delete {{.Title}}"
+          hx-post="/feeds/{{.ID}}/delete"
+          hx-confirm="Delete feed &quot;{{.Title}}&quot;? This cannot be undone.">&#128465;</button>
+      </div>
     </li>
     {{end}}
   </ul>

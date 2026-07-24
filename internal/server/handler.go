@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"errors"
 	"html/template"
 	"io"
@@ -31,7 +32,8 @@ const pageCSP = "default-src 'self'; script-src 'self'; object-src 'none'; base-
 // frameCSP is applied to the sandboxed article-content document rendered
 // inside the read pane's iframe. It's even stricter than pageCSP: the frame
 // never needs to navigate or submit anywhere.
-const frameCSP = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox"
+const frameCSP = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; " +
+	"sandbox allow-popups allow-popups-to-escape-sandbox"
 
 // Handler serves GoRead's read-only, server-rendered web UI: a three-pane
 // layout showing the folder/feed tree, the selected feed's article list, and
@@ -42,19 +44,24 @@ type Handler struct {
 	templates *template.Template
 	images    *imageproxy.Client
 	scheduler *feed.Scheduler
+	fetcher   *feed.Fetcher
+	sqlDB     *sql.DB
 }
 
 // NewHandler builds a Handler backed by the given repositories. scheduler
 // may be nil (e.g. in tests that don't exercise manual refresh), in which
 // case the manual refresh route is a no-op that just re-renders current
-// state.
-func NewHandler(feeds *db.FeedRepo, articles *db.ArticleRepo, scheduler *feed.Scheduler) *Handler {
+// state. sqlDB backs the /backup download route; it may be nil in tests that
+// don't exercise it.
+func NewHandler(feeds *db.FeedRepo, articles *db.ArticleRepo, scheduler *feed.Scheduler, sqlDB *sql.DB) *Handler {
 	return &Handler{
 		feeds:     feeds,
 		articles:  articles,
 		templates: parseTemplates(),
 		images:    imageproxy.New(),
 		scheduler: scheduler,
+		fetcher:   feed.NewFetcher(),
+		sqlDB:     sqlDB,
 	}
 }
 
@@ -63,7 +70,11 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	mux.HandleFunc("GET /{$}", h.handleIndex)
+	mux.HandleFunc("POST /feeds", h.handleAddFeed)
 	mux.HandleFunc("GET /feeds/{id}", h.handleFeed)
+	mux.HandleFunc("GET /feeds/{id}/edit", h.handleEditFeedForm)
+	mux.HandleFunc("POST /feeds/{id}/edit", h.handleUpdateFeed)
+	mux.HandleFunc("POST /feeds/{id}/delete", h.handleDeleteFeed)
 	mux.HandleFunc("GET /feeds/{id}/articles/{articleID}", h.handleArticle)
 	mux.HandleFunc("GET /feeds/{id}/articles/{articleID}/content", h.handleArticleFrame)
 	mux.HandleFunc("POST /feeds/{id}/articles/{articleID}/read", h.handleSetArticleRead)
@@ -74,6 +85,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /search", h.handleSearch)
 	mux.HandleFunc("GET /opml/export", h.handleOPMLExport)
 	mux.HandleFunc("POST /opml/import", h.handleOPMLImport)
+	mux.HandleFunc("GET /backup", h.handleBackup)
 	return withCSP(mux)
 }
 
@@ -107,6 +119,18 @@ type pageData struct {
 	SearchActive  bool
 	SearchQuery   string
 	SearchResults []*model.SearchResult
+	// AddFeed* fields let the "add feed" form (in feed_tree.html) redisplay
+	// what the user entered alongside a validation error, instead of losing
+	// their input on a rejected submission.
+	AddFeedError  string
+	AddFeedURL    string
+	AddFeedFolder string
+	// EditFeed* fields are set by handleEditFeedForm/handleUpdateFeed; the
+	// article-list pane renders the edit form in place of the article list
+	// whenever EditFeedActive is true.
+	EditFeedActive bool
+	EditFeed       *model.Feed
+	EditFeedError  string
 }
 
 // buildFolders groups feeds (already ordered by folder, then title) into
@@ -128,6 +152,114 @@ func buildFolders(feeds []*model.Feed) []folderView {
 }
 
 func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
+	h.render(w, r, pageData{})
+}
+
+// handleAddFeed handles the "add feed" form in feed_tree.html: it validates
+// and creates a new feed via feed.AddFeed (which fetches/parses the URL up
+// front so a bad one is rejected with a clear error rather than silently
+// sitting there until the next scheduled refresh), then jumps straight to
+// the new feed's page. On failure, the form's entered values and error are
+// redisplayed rather than losing the user's input.
+func (h *Handler) handleAddFeed(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	feedURL := r.FormValue("url")
+	folder := r.FormValue("folder")
+
+	f, err := feed.AddFeed(r.Context(), h.fetcher, h.feeds, h.scheduler, feedURL, folder)
+	if err != nil {
+		h.render(w, r, pageData{
+			AddFeedError:  err.Error(),
+			AddFeedURL:    feedURL,
+			AddFeedFolder: folder,
+		})
+		return
+	}
+
+	h.render(w, r, pageData{
+		SelectedFeedID: f.ID,
+		SelectedFeed:   f,
+	})
+}
+
+// handleEditFeedForm renders the "edit feed" form (title/folder/site URL) in
+// place of the article list pane.
+func (h *Handler) handleEditFeedForm(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	f, err := h.feeds.Get(feedID)
+	if errors.Is(err, db.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	h.render(w, r, pageData{
+		SelectedFeedID: feedID,
+		SelectedFeed:   f,
+		EditFeedActive: true,
+		EditFeed:       f,
+	})
+}
+
+// handleUpdateFeed saves the "edit feed" form: folder/site URL are plain
+// columns, so this is a straightforward FeedRepo.Update, followed by
+// re-rendering the feed tree (buildFolders groups by the folder column at
+// render time, so a folder change is picked up immediately). Title is not
+// user-editable here — it's always sourced from the feed itself (see
+// Syncer.applyFeedMetadata, which overwrites it on every refresh anyway).
+func (h *Handler) handleUpdateFeed(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	f, err := h.feeds.Get(feedID)
+	if errors.Is(err, db.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+
+	f.Folder = strings.TrimSpace(r.FormValue("folder"))
+	f.SiteURL = strings.TrimSpace(r.FormValue("site_url"))
+	if err := h.feeds.Update(f); err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	h.render(w, r, pageData{
+		SelectedFeedID: feedID,
+		SelectedFeed:   f,
+	})
+}
+
+// handleDeleteFeed deletes a feed (its articles cascade via the FK) after
+// the UI's confirmation prompt, then falls back to the index page since the
+// just-deleted feed can no longer be selected.
+func (h *Handler) handleDeleteFeed(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if err := h.feeds.Delete(feedID); err != nil && !errors.Is(err, db.ErrNotFound) {
+		h.serverError(w, err)
+		return
+	}
+
 	h.render(w, r, pageData{})
 }
 
@@ -525,6 +657,16 @@ func (h *Handler) handleOPMLImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, r, pageData{})
+}
+
+// handleBackup forces the download of a consistent snapshot of the SQLite
+// database, per docs/spec.md "Backups".
+func (h *Handler) handleBackup(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/vnd.sqlite3")
+	w.Header().Set("Content-Disposition", `attachment; filename="goread-backup.sqlite"`)
+	if err := db.Backup(h.sqlDB, w); err != nil {
+		log.Printf("backup: %v", err)
+	}
 }
 
 // render fills in the feed tree (present on every page) and executes either

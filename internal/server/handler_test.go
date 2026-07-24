@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +29,7 @@ func newTestHandler(t *testing.T) (*Handler, *db.FeedRepo, *db.ArticleRepo) {
 
 	feeds := db.NewFeedRepo(sqlDB)
 	articles := db.NewArticleRepo(sqlDB)
-	return NewHandler(feeds, articles, nil), feeds, articles
+	return NewHandler(feeds, articles, nil, sqlDB), feeds, articles
 }
 
 func TestHandleIndex_NoFeeds(t *testing.T) {
@@ -127,8 +128,8 @@ func TestHandleArticle_RendersContent(t *testing.T) {
 	if !strings.Contains(body, wantSrc) {
 		t.Errorf("expected sandboxed iframe pointing at %q, got: %s", wantSrc, body)
 	}
-	if !strings.Contains(body, `sandbox=""`) {
-		t.Errorf("expected empty sandbox attribute on article iframe, got: %s", body)
+	if !strings.Contains(body, `sandbox="allow-popups allow-popups-to-escape-sandbox"`) {
+		t.Errorf("expected sandbox attribute allowing popups on article iframe, got: %s", body)
 	}
 }
 
@@ -561,6 +562,29 @@ func TestHandleOPMLExport_ListsFeeds(t *testing.T) {
 	}
 }
 
+func TestHandleBackup_ServesSQLiteFile(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed", FeedURL: "https://example.com/feed.xml"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/backup", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") {
+		t.Errorf("Content-Disposition = %q, want attachment", cd)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("SQLite format 3")) {
+		t.Errorf("backup body does not look like a SQLite file")
+	}
+}
+
 func TestHandleOPMLImport_CreatesFeedFromUpload(t *testing.T) {
 	h, feeds, _ := newTestHandler(t)
 
@@ -609,5 +633,134 @@ func TestHandleOPMLImport_MissingFileReturns400(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func postForm(h *Handler, path string, form url.Values) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.Routes().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHandleAddFeed_CreatesFeedAndRedirectsToIt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>Added</title></channel></rss>`))
+	}))
+	defer srv.Close()
+
+	h, feeds, _ := newTestHandler(t)
+
+	rec := postForm(h, "/feeds", url.Values{"url": {srv.URL}, "folder": {"Tech"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := feeds.GetByURL(srv.URL)
+	if err != nil {
+		t.Fatalf("GetByURL() error = %v", err)
+	}
+	if got.Title != "Added" || got.Folder != "Tech" {
+		t.Errorf("feed = %+v, want Title=Added Folder=Tech", got)
+	}
+}
+
+func TestHandleAddFeed_InvalidURLRedisplaysFormWithError(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+
+	closedSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closedSrv.URL
+	closedSrv.Close()
+
+	rec := postForm(h, "/feeds", url.Values{"url": {closedURL}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "fetch feed") {
+		t.Errorf("body does not surface add-feed error: %s", rec.Body.String())
+	}
+
+	all, err := feeds.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("List() = %d feeds, want 0 after a rejected add", len(all))
+	}
+}
+
+func TestHandleEditFeedForm_RendersCurrentValues(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+	f := &model.Feed{Title: "Original", FeedURL: "https://example.com/feed.xml", Folder: "News"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/feeds/"+strconv.FormatInt(f.ID, 10)+"/edit", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Original") {
+		t.Errorf("edit form does not show current title: %s", rec.Body.String())
+	}
+}
+
+func TestHandleUpdateFeed_ChangesFolderAndSiteURLNotTitle(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+	f := &model.Feed{Title: "Original", FeedURL: "https://example.com/feed.xml", Folder: "News"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+
+	rec := postForm(h, "/feeds/"+strconv.FormatInt(f.ID, 10)+"/edit", url.Values{
+		"title": {"Renamed"}, "folder": {"Tech"}, "site_url": {"https://renamed.example.com"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := feeds.Get(f.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.Title != "Original" || got.Folder != "Tech" || got.SiteURL != "https://renamed.example.com" {
+		t.Errorf("feed after update = %+v, want Title=Original (unchanged) Folder=Tech SiteURL=https://renamed.example.com", got)
+	}
+}
+
+func TestHandleDeleteFeed_RemovesFeedAndCascadesArticles(t *testing.T) {
+	h, feeds, articles := newTestHandler(t)
+	f := &model.Feed{Title: "ToDelete", FeedURL: "https://example.com/feed.xml"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+	a := &model.Article{FeedID: f.ID, Title: "A1", GUID: "1"}
+	if err := articles.Create(a); err != nil {
+		t.Fatalf("create article: %v", err)
+	}
+
+	rec := postForm(h, "/feeds/"+strconv.FormatInt(f.ID, 10)+"/delete", url.Values{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := feeds.Get(f.ID); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("Get(deleted feed) error = %v, want ErrNotFound", err)
+	}
+	if _, err := articles.Get(a.ID); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("Get(cascaded article) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestHandleDeleteFeed_UnknownFeedStillRendersIndex(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+
+	rec := postForm(h, "/feeds/999/delete", url.Values{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
 	}
 }

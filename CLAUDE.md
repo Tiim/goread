@@ -8,8 +8,8 @@ GoRead is a lightweight, self-hosted RSS/Atom reader written in Go, for a single
 as a single executable installable via `go install`, uses SQLite as its only datastore, requires no
 authentication, and runs entirely on `localhost`. Full requirements are in `docs/spec.md`; the staged
 implementation plan is in `docs/phases.md` — check which phase is current before starting work, and implement
-phases in order. Phases 1–7 are implemented; Phase 8 (browser auto-open, DB backup download, accessibility
-sweep, final `go install` verification) is next.
+phases in order. Phases 1–8 are implemented; Phase 9 (manual feed add/delete/edit-folder usability helpers) is
+next, followed by Phase 10 (feed merging for convergent-URL duplicates).
 
 ## Commands
 
@@ -61,8 +61,15 @@ nearest-neighbor resize to keep dependencies minimal.
     input can never be interpreted as FTS5 query syntax. `articleSelectColumns` qualifies every column with
     `articles.` (needed once `Search`'s join with `feeds` makes bare column names ambiguous) — keep using it
     rather than reintroducing unqualified `SELECT id, ...` on new queries.
+  - `backup.go`: `Backup(sqlDB, w)` streams a consistent snapshot to w via `VACUUM INTO` a temp file (then
+    copies and removes it), rather than copying the on-disk `.sqlite` file directly — the latter would race the
+    WAL journal (`journal_mode=WAL`, see pragmas above) and could omit committed-but-not-checkpointed data.
+    Backs `GET /backup` in `internal/server`.
 - `internal/model` — plain structs (`Feed`, `Article`, `SearchResult`) shared across the DB layer and the web
   layer.
+- `internal/browser` — `Open(url)` shells out to the OS's default-browser opener (`xdg-open`/`open`/`rundll32`)
+  at startup, per spec ("Open the browser"). `main.go` calls it in its own goroutine so a slow or failing opener
+  can never block server startup or feed refreshing.
 - `internal/server` — HTTP server and the server-rendered web UI:
   - `listen.go`: `Listen(startPort)` binds to `localhost` starting at the given port, incrementing on
     `EADDRINUSE` until a free port is found (per spec, GoRead must never fail to start due to a busy port 8080).
@@ -89,6 +96,11 @@ nearest-neighbor resize to keep dependencies minimal.
     - `GET /proxy/image` — routes remote article images through `internal/imageproxy` so the browser never
       contacts a third-party host directly; responses set `Cache-Control: no-store` (images are re-fetched on
       every view, per spec).
+    - `GET /backup` — forces download of a `.sqlite` snapshot via `db.Backup`, per spec ("Backups").
+    Since `#app`'s `hx-boost="true"` (see below) would otherwise intercept these two file-download links as
+    AJAX navigations and try to swap the raw file bytes into the page, both the OPML export and backup links in
+    `feed_tree.html` carry `hx-boost="false"` so they fall through to a normal browser navigation/download
+    instead.
     All routes share `render()`, which always reloads the feed list to rebuild the left-pane tree and picks the
     `"layout"` (full page) vs `"app"` (fragment) template based on the `HX-Request` header. `buildFolders`
     groups the already-`ORDER BY folder, title`-sorted feed list into consecutive buckets, labeling the empty

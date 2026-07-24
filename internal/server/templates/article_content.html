@@ -11,10 +11,10 @@
   {{if .SelectedArticle.Author}}<span class="article-author">{{.SelectedArticle.Author}}</span>{{end}}
   {{if .SelectedArticle.PublishedAt}}<span class="article-published">{{.SelectedArticle.PublishedAt.Format "Jan 2, 2006 15:04"}}</span>{{end}}
 </p>
-{{if .SelectedArticle.Link}}<p class="article-link"><a href="{{.SelectedArticle.Link}}" target="_blank" rel="noopener noreferrer">Open original</a></p>{{end}}
+{{if .SelectedArticle.Link}}<p class="article-link"><a href="{{.SelectedArticle.Link}}" target="_blank" rel="noopener noreferrer">Open original<span class="sr-only"> (opens in a new tab)</span></a></p>{{end}}
 <iframe class="article-frame" title="Article content"
   src="/feeds/{{.SelectedFeedID}}/articles/{{.SelectedArticleID}}/content"
-  sandbox="" referrerpolicy="no-referrer" loading="lazy"></iframe>
+  sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" loading="lazy"></iframe>
 {{else}}
 <p class="empty">Select an article to read it.</p>
 {{end}}

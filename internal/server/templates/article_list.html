@@ -1,5 +1,19 @@
 {{define "article_list"}}
-{{if .SearchActive}}
+{{if .EditFeedActive}}
+<div class="pane-heading-row">
+  <h2 class="pane-heading">Edit {{.EditFeed.Title}}</h2>
+</div>
+<form class="stacked-form edit-feed-form" action="/feeds/{{.EditFeed.ID}}/edit" method="post">
+  <p class="field-hint">Title is fetched from the feed and can't be edited here.</p>
+  <label>Folder <input type="text" name="folder" value="{{.EditFeed.Folder}}"></label>
+  <label>Site URL <input type="url" name="site_url" value="{{.EditFeed.SiteURL}}"></label>
+  <div class="form-actions">
+    <button type="submit">Save</button>
+    <a href="/feeds/{{.EditFeed.ID}}">Cancel</a>
+  </div>
+</form>
+{{if .EditFeedError}}<p class="form-error" role="alert">{{.EditFeedError}}</p>{{end}}
+{{else if .SearchActive}}
 <div class="pane-heading-row">
   <h2 class="pane-heading">Search: &ldquo;{{.SearchQuery}}&rdquo;</h2>
 </div>
@@ -30,8 +44,8 @@
 <ul class="article-list">
   {{range .Articles}}
   <li class="article-item{{if eq .ID $.SelectedArticleID}} selected{{end}}{{if not .Read}} unread{{end}}">
-    <a href="/feeds/{{$.SelectedFeed.ID}}/articles/{{.ID}}">
-      <span class="article-title">{{.Title}}</span>
+    <a href="/feeds/{{$.SelectedFeed.ID}}/articles/{{.ID}}"{{if eq .ID $.SelectedArticleID}} aria-current="page"{{end}}>
+      <span class="article-title">{{.Title}}{{if not .Read}}<span class="sr-only"> (unread)</span>{{end}}</span>
       {{if .PublishedAt}}<span class="article-date">{{.PublishedAt.Format "Jan 2, 2006"}}</span>{{end}}
     </a>
   </li>

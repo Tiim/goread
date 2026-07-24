@@ -86,7 +86,28 @@ Goal: The application behaves exactly as a seamless local desktop app and fulfil
     - Perform a full accessibility sweep.
     - Verify the build process (`go install cmd/goread/main.go`) pulls no external static files and results in a single, fully functional binary.
 
-### Phase 9: Feed Merging
+### Phase 9: Feed Management Usability
+
+Goal: Feeds no longer have to arrive via OPML import — the user can add, remove, and reorganize them directly
+from the UI, covering the day-to-day housekeeping that phases 1–8 didn't need to build the core reader.
+
+- Tasks:
+    - Implement "add feed" (feed URL, optional title override, optional folder): validate/fetch/parse the URL
+      up front so a bad or unreachable URL is rejected with a clear error before a `feeds` row is ever created,
+      then create the feed and queue it through `Scheduler.TriggerRefresh` for an immediate first sync, mirroring
+      how `feed.ImportOPML` already does this per-feed.
+    - Implement "delete feed": remove the `feeds` row (cascading to its `articles` via the existing FK) after
+      user confirmation, since articles are otherwise kept indefinitely (`ArticleState`) and there'd be no other
+      way to actually get rid of an unwanted feed.
+    - Implement "edit feed" (rename, move to a different/new folder, change site URL if needed): a plain
+      `UPDATE` via `FeedRepo`, re-rendering the feed tree afterward since folder grouping is computed from the
+      `feeds.folder` column at render time (`buildFolders`).
+    - Wire all three into the feed tree UI (`feed_tree.html`) as HTMX-boosted forms/links consistent with the
+      rest of the app, with server-side validation errors surfaced inline rather than as raw HTTP error pages.
+    - TDD Focus: add-feed URL validation/error paths, delete-feed cascade behavior (articles actually gone,
+      not just orphaned), and folder-rename/move correctness in `buildFolders` grouping.
+
+### Phase 10: Feed Merging
 
 Goal: When two separately-added feeds turn out to point at the same underlying source (e.g. their permanent redirects converge on the same canonical URL — see `internal/feed/refresh.go`'s `GetByURL` collision guard, which currently just keeps each feed's original URL to avoid a `UNIQUE` constraint failure), the user can explicitly merge them into one instead of carrying two duplicate entries indefinitely.
 
