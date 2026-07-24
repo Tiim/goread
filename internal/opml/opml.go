@@ -7,6 +7,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"strings"
+	"unicode"
 )
 
 // Feed is a single subscription entry extracted from (or destined for) an
@@ -71,9 +73,51 @@ func walkOutlines(outlines []opmlOutline, folder string, feeds *[]Feed) {
 			continue
 		}
 
+		if inner, ok := unwrapFeedOutline(o); ok {
+			*feeds = append(*feeds, Feed{
+				Title:   outlineName(inner),
+				FeedURL: inner.XMLURL,
+				SiteURL: inner.HTMLURL,
+				Folder:  folder,
+			})
+			continue
+		}
+
 		childFolder := joinFolder(folder, outlineName(o))
 		walkOutlines(o.Outlines, childFolder, feeds)
 	}
+}
+
+// unwrapFeedOutline detects Thunderbird's OPML export quirk of wrapping
+// every single feed subscription in its own intermediate outline named
+// (almost) identically to the feed itself - producing a redundant
+// folder/podcastname/podcastname nesting rather than folder/podcastname.
+// If o is such a wrapper (its only child is a feed leaf whose name matches
+// o's own name closely enough - the two commonly drift slightly, e.g.
+// "Weekly Comic Often updated" vs "Weekly Comic. Often updated.", or a
+// shortened form like "Nickname" vs "Nickname's Extended Blog Title" - the
+// inner feed outline is returned directly so no extra folder level is
+// introduced for it. A wrapper with more than one child, or whose name
+// doesn't relate to its child's, is left alone and treated as a genuine
+// folder.
+func unwrapFeedOutline(o opmlOutline) (opmlOutline, bool) {
+	if len(o.Outlines) != 1 {
+		return opmlOutline{}, false
+	}
+	inner := o.Outlines[0]
+	if inner.XMLURL == "" || len(inner.Outlines) != 0 {
+		return opmlOutline{}, false
+	}
+
+	outerName := normalizeName(outlineName(o))
+	innerName := normalizeName(outlineName(inner))
+	if outerName == "" || innerName == "" {
+		return opmlOutline{}, false
+	}
+	if outerName != innerName && !strings.Contains(innerName, outerName) && !strings.Contains(outerName, innerName) {
+		return opmlOutline{}, false
+	}
+	return inner, true
 }
 
 func outlineName(o opmlOutline) string {
@@ -81,6 +125,19 @@ func outlineName(o opmlOutline) string {
 		return o.Title
 	}
 	return o.Text
+}
+
+// normalizeName lowercases s and strips everything but letters/digits, so
+// names that differ only in punctuation or whitespace (e.g. a trailing
+// period, an em-dash vs. a space) compare equal.
+func normalizeName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToLower(r))
+		}
+	}
+	return b.String()
 }
 
 func joinFolder(parent, name string) string {

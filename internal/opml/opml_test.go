@@ -96,3 +96,53 @@ func TestGenerate_ContainsOPMLStructure(t *testing.T) {
 		}
 	}
 }
+
+// sampleThunderbirdOPML reproduces Thunderbird's OPML export quirk of
+// wrapping every single feed subscription in its own intermediate outline
+// named (almost) identically to the feed - producing a redundant
+// folder/podcastname/podcastname nesting that Parse must collapse back down
+// to folder/podcastname.
+const sampleThunderbirdOPML = `<?xml version="1.0"?>
+<opml version="1.0">
+  <body>
+    <outline title="Comics">
+      <outline title="Weekly Comic Often updated">
+        <outline type="rss" title="Weekly Comic. Often updated." text="Weekly Comic. Often updated." xmlUrl="https://weeklycomic.example.com/feeds/rss/" htmlUrl="https://weeklycomic.example.com/latest/"/>
+      </outline>
+      <outline title="dailydoodleexample">
+        <outline type="rss" title="dailydoodle.example" text="dailydoodle.example" xmlUrl="https://dailydoodle.example/rss.xml" htmlUrl="https://dailydoodle.example/"/>
+      </outline>
+    </outline>
+    <outline title="Devs">
+      <outline title="Nickname Only">
+        <outline type="rss" title="Nickname Only's Extended Blog Title" text="Nickname Only's Extended Blog Title" xmlUrl="https://example-author.example/index.xml" htmlUrl="https://example-author.example/"/>
+      </outline>
+    </outline>
+    <outline title="Solo Folder">
+      <outline type="rss" title="Unrelated Feed Name" xmlUrl="https://solo.example.com/feed.xml"/>
+    </outline>
+  </body>
+</opml>
+`
+
+func TestParse_ThunderbirdWrapperOutlinesAreCollapsed(t *testing.T) {
+	feeds, err := Parse(strings.NewReader(sampleThunderbirdOPML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	want := []Feed{
+		{Title: "Weekly Comic. Often updated.", FeedURL: "https://weeklycomic.example.com/feeds/rss/", SiteURL: "https://weeklycomic.example.com/latest/", Folder: "Comics"},
+		{Title: "dailydoodle.example", FeedURL: "https://dailydoodle.example/rss.xml", SiteURL: "https://dailydoodle.example/", Folder: "Comics"},
+		{Title: "Nickname Only's Extended Blog Title", FeedURL: "https://example-author.example/index.xml", SiteURL: "https://example-author.example/", Folder: "Devs"},
+		{Title: "Unrelated Feed Name", FeedURL: "https://solo.example.com/feed.xml", Folder: "Solo Folder"},
+	}
+	if len(feeds) != len(want) {
+		t.Fatalf("Parse() returned %d feeds, want %d: %+v", len(feeds), len(want), feeds)
+	}
+	for i, w := range want {
+		if feeds[i] != w {
+			t.Errorf("feeds[%d] = %+v, want %+v", i, feeds[i], w)
+		}
+	}
+}

@@ -150,7 +150,12 @@ nearest-neighbor resize to keep dependencies minimal.
   operate on `[]opml.Feed`, not `model.Feed`, so callers translate). Nested `<outline>` folder groups are
   flattened into a single `Feed.Folder` string joined with `/`, since GoRead's schema stores folder as one flat
   column rather than a true hierarchy; round-tripping through `Generate` preserves that flattened string as a
-  single-level outline group, not a re-nested hierarchy.
+  single-level outline group, not a re-nested hierarchy. `unwrapFeedOutline` detects and collapses Thunderbird's
+  export quirk of wrapping every single feed in its own intermediate outline named (almost) identically to the
+  feed itself, which would otherwise produce a redundant `folder/podcastname/podcastname` nesting — it only
+  collapses a single-child wrapper whose name matches (or loosely relates to, allowing for punctuation drift or
+  a shortened form) its child's, via `normalizeName`, so a genuine folder that happens to contain just one
+  differently-named feed is left alone.
 - `internal/favicon` — fetches and downsizes a feed's favicon for storage (`Client.Fetch(ctx, candidateURL,
   siteURL)`), trying `candidateURL` first and `siteURL + "/favicon.ico"` second; returns a `nil` `*Result` with
   a `nil` error (not an error) when neither source yields anything, since a missing favicon isn't a failure.

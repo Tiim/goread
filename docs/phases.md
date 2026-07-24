@@ -85,3 +85,13 @@ Goal: The application behaves exactly as a seamless local desktop app and fulfil
     - Implement the database backup feature (an endpoint that forces the download of the `.sqlite` file).
     - Perform a full accessibility sweep.
     - Verify the build process (`go install cmd/goread/main.go`) pulls no external static files and results in a single, fully functional binary.
+
+### Phase 9: Feed Merging
+
+Goal: When two separately-added feeds turn out to point at the same underlying source (e.g. their permanent redirects converge on the same canonical URL — see `internal/feed/refresh.go`'s `GetByURL` collision guard, which currently just keeps each feed's original URL to avoid a `UNIQUE` constraint failure), the user can explicitly merge them into one instead of carrying two duplicate entries indefinitely.
+
+- Tasks:
+    - Detect and surface convergent-URL feed pairs to the user (e.g. a UI indicator/list) rather than silently leaving them split, building on the existing collision guard in `Refresher.Refresh`.
+    - Design and implement a "merge feeds" action: user picks the surviving feed (title/folder), reassign the other feed's `articles.feed_id` rows to it, reconcile read states, and delete the losing feed row.
+    - Decide how article identity/dedup interacts with merging (two previously-independent feeds may have separately-synced overlapping articles under different GUIDs).
+    - TDD Focus: Article reassignment correctness, read-state preservation, and rollback safety if a merge fails partway through.

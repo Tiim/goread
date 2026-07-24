@@ -80,7 +80,15 @@ func (r *Refresher) Refresh(ctx context.Context, feedID int64) (SyncResult, erro
 	}
 
 	if fetched.FinalURL != "" && fetched.FinalURL != f.FeedURL {
-		f.FeedURL = fetched.FinalURL
+		if existing, err := r.Feeds.GetByURL(fetched.FinalURL); err == nil && existing.ID != f.ID {
+			// Another feed already uses this URL (e.g. two feeds whose
+			// permanent redirects converge on the same canonical URL).
+			// Keep this feed's original URL rather than failing every
+			// future refresh on a UNIQUE constraint violation.
+			log.Printf("refresh: feed %d redirects to %s, already used by feed %d; keeping original URL", f.ID, fetched.FinalURL, existing.ID)
+		} else {
+			f.FeedURL = fetched.FinalURL
+		}
 	}
 
 	if fetched.NotModified {
