@@ -51,6 +51,9 @@
       <div class="feed-item-actions">
         <button type="button" class="feed-refresh" aria-label="Refresh {{.Title}} now"
           hx-post="/feeds/{{.ID}}/refresh">&#8635;</button>
+        {{if .MergeCandidateID}}
+        <a href="/feeds/{{.ID}}/merge" class="feed-merge" aria-label="Merge {{.Title}} with a duplicate feed" title="Possible duplicate feed found - merge?">&#128279;</a>
+        {{end}}
         <a href="/feeds/{{.ID}}/edit" class="feed-edit" aria-label="Edit {{.Title}}">&#9998;</a>
         <button type="button" class="feed-delete" aria-label="Delete {{.Title}}"
           hx-post="/feeds/{{.ID}}/delete"

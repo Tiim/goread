@@ -764,3 +764,118 @@ func TestHandleDeleteFeed_UnknownFeedStillRendersIndex(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestHandleMergeFeedForm_NoCandidateRedirectsToFeed(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+	f := &model.Feed{Title: "Solo", FeedURL: "https://example.com/feed.xml"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/feeds/"+strconv.FormatInt(f.ID, 10)+"/merge", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rec.Code)
+	}
+	if want := "/feeds/" + strconv.FormatInt(f.ID, 10); rec.Header().Get("Location") != want {
+		t.Errorf("Location = %q, want %q", rec.Header().Get("Location"), want)
+	}
+}
+
+func TestHandleMergeFeedForm_ShowsBothCandidates(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+	a := &model.Feed{Title: "Feed A", FeedURL: "https://a.example.com/feed.xml"}
+	if err := feeds.Create(a); err != nil {
+		t.Fatalf("create feed a: %v", err)
+	}
+	b := &model.Feed{Title: "Feed B", FeedURL: "https://b.example.com/feed.xml"}
+	if err := feeds.Create(b); err != nil {
+		t.Fatalf("create feed b: %v", err)
+	}
+	a.MergeCandidateID = &b.ID
+	if err := feeds.Update(a); err != nil {
+		t.Fatalf("update feed a: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/feeds/"+strconv.FormatInt(a.ID, 10)+"/merge", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Feed A") || !strings.Contains(body, "Feed B") {
+		t.Errorf("merge form does not show both feeds: %s", body)
+	}
+}
+
+func TestHandleMergeFeed_MergesArticlesAndDeletesLoser(t *testing.T) {
+	h, feeds, articles := newTestHandler(t)
+	survivor := &model.Feed{Title: "Survivor", FeedURL: "https://a.example.com/feed.xml"}
+	if err := feeds.Create(survivor); err != nil {
+		t.Fatalf("create survivor: %v", err)
+	}
+	loser := &model.Feed{Title: "Loser", FeedURL: "https://b.example.com/feed.xml"}
+	if err := feeds.Create(loser); err != nil {
+		t.Fatalf("create loser: %v", err)
+	}
+	survivor.MergeCandidateID = &loser.ID
+	if err := feeds.Update(survivor); err != nil {
+		t.Fatalf("update survivor: %v", err)
+	}
+	loser.MergeCandidateID = &survivor.ID
+	if err := feeds.Update(loser); err != nil {
+		t.Fatalf("update loser: %v", err)
+	}
+	a := &model.Article{FeedID: loser.ID, Title: "Article", GUID: "g1"}
+	if err := articles.Create(a); err != nil {
+		t.Fatalf("create article: %v", err)
+	}
+
+	rec := postForm(h, "/feeds/"+strconv.FormatInt(survivor.ID, 10)+"/merge", url.Values{
+		"survivor_id": {strconv.FormatInt(survivor.ID, 10)},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := feeds.Get(loser.ID); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("Get(loser) error = %v, want ErrNotFound", err)
+	}
+	got, err := articles.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get(article) error = %v", err)
+	}
+	if got.FeedID != survivor.ID {
+		t.Errorf("article.FeedID = %d, want %d", got.FeedID, survivor.ID)
+	}
+	if !strings.Contains(rec.Body.String(), "Article") {
+		t.Errorf("response does not show the merged-in article: %s", rec.Body.String())
+	}
+}
+
+func TestHandleMergeFeed_InvalidSurvivorIDReturns400(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+	a := &model.Feed{Title: "Feed A", FeedURL: "https://a.example.com/feed.xml"}
+	if err := feeds.Create(a); err != nil {
+		t.Fatalf("create feed a: %v", err)
+	}
+	b := &model.Feed{Title: "Feed B", FeedURL: "https://b.example.com/feed.xml"}
+	if err := feeds.Create(b); err != nil {
+		t.Fatalf("create feed b: %v", err)
+	}
+	a.MergeCandidateID = &b.ID
+	if err := feeds.Update(a); err != nil {
+		t.Fatalf("update feed a: %v", err)
+	}
+
+	rec := postForm(h, "/feeds/"+strconv.FormatInt(a.ID, 10)+"/merge", url.Values{
+		"survivor_id": {"999999"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rec.Code, rec.Body.String())
+	}
+}

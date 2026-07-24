@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"log"
@@ -75,6 +76,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /feeds/{id}/edit", h.handleEditFeedForm)
 	mux.HandleFunc("POST /feeds/{id}/edit", h.handleUpdateFeed)
 	mux.HandleFunc("POST /feeds/{id}/delete", h.handleDeleteFeed)
+	mux.HandleFunc("GET /feeds/{id}/merge", h.handleMergeFeedForm)
+	mux.HandleFunc("POST /feeds/{id}/merge", h.handleMergeFeed)
 	mux.HandleFunc("GET /feeds/{id}/articles/{articleID}", h.handleArticle)
 	mux.HandleFunc("GET /feeds/{id}/articles/{articleID}/content", h.handleArticleFrame)
 	mux.HandleFunc("POST /feeds/{id}/articles/{articleID}/read", h.handleSetArticleRead)
@@ -131,6 +134,14 @@ type pageData struct {
 	EditFeedActive bool
 	EditFeed       *model.Feed
 	EditFeedError  string
+	// Merge* fields are set by handleMergeFeedForm; the article-list pane
+	// renders the merge confirmation form in place of the article list
+	// whenever MergeActive is true (see Phase 10, feed_tree.html's merge
+	// indicator on feeds with a MergeCandidateID).
+	MergeActive bool
+	MergeFeed   *model.Feed
+	MergeOther  *model.Feed
+	MergeError  string
 }
 
 // buildFolders groups feeds (already ordered by folder, then title) into
@@ -261,6 +272,106 @@ func (h *Handler) handleDeleteFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, r, pageData{})
+}
+
+// handleMergeFeedForm renders the "merge feeds" confirmation form (in place
+// of the article list pane) for a feed that Refresher.Refresh flagged as
+// sharing its canonical feed_url with another feed (see
+// Feed.MergeCandidateID). If the feed has no pending candidate (e.g. a stale
+// link, or the candidate was already merged away by someone else), it falls
+// back to the feed's normal page instead of erroring.
+func (h *Handler) handleMergeFeedForm(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	f, err := h.feeds.Get(feedID)
+	if errors.Is(err, db.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	if f.MergeCandidateID == nil {
+		http.Redirect(w, r, fmt.Sprintf("/feeds/%d", feedID), http.StatusSeeOther)
+		return
+	}
+	other, err := h.feeds.Get(*f.MergeCandidateID)
+	if errors.Is(err, db.ErrNotFound) {
+		http.Redirect(w, r, fmt.Sprintf("/feeds/%d", feedID), http.StatusSeeOther)
+		return
+	} else if err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	h.render(w, r, pageData{
+		SelectedFeedID: feedID,
+		SelectedFeed:   f,
+		MergeActive:    true,
+		MergeFeed:      f,
+		MergeOther:     other,
+	})
+}
+
+// handleMergeFeed performs the merge the user confirmed in the form above:
+// the form's survivor_id must be either {id} or its merge candidate, and the
+// other one is merged into it and deleted (db.MergeFeeds). The result is the
+// survivor's page, since the loser can no longer be selected.
+func (h *Handler) handleMergeFeed(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	f, err := h.feeds.Get(feedID)
+	if errors.Is(err, db.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	if f.MergeCandidateID == nil {
+		http.Redirect(w, r, fmt.Sprintf("/feeds/%d", feedID), http.StatusSeeOther)
+		return
+	}
+	otherID := *f.MergeCandidateID
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	survivorID, err := strconv.ParseInt(r.FormValue("survivor_id"), 10, 64)
+	if err != nil || (survivorID != feedID && survivorID != otherID) {
+		http.Error(w, "invalid survivor_id", http.StatusBadRequest)
+		return
+	}
+	loserID := otherID
+	if survivorID == otherID {
+		loserID = feedID
+	}
+
+	if err := db.MergeFeeds(h.sqlDB, survivorID, loserID); err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	survivor, err := h.feeds.Get(survivorID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	articles, err := h.articles.ListByFeed(survivorID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	h.render(w, r, pageData{
+		SelectedFeedID: survivorID,
+		SelectedFeed:   survivor,
+		Articles:       articles,
+	})
 }
 
 func (h *Handler) handleFeed(w http.ResponseWriter, r *http.Request) {

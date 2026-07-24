@@ -219,6 +219,51 @@ func TestRefresher_Refresh_PermanentRedirectPersistsNewURL(t *testing.T) {
 	}
 }
 
+func TestRefresher_Refresh_ConvergentRedirectFlagsBothFeedsAsMergeCandidates(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/redirecting.xml", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/canonical.xml", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("/canonical.xml", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(refreshFeedXML))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	refresher, feeds, _ := newTestRefresher(t)
+	existing := &model.Feed{FeedURL: srv.URL + "/canonical.xml"}
+	if err := feeds.Create(existing); err != nil {
+		t.Fatalf("Create(existing) error = %v", err)
+	}
+	redirecting := &model.Feed{FeedURL: srv.URL + "/redirecting.xml"}
+	if err := feeds.Create(redirecting); err != nil {
+		t.Fatalf("Create(redirecting) error = %v", err)
+	}
+
+	if _, err := refresher.Refresh(context.Background(), redirecting.ID); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	gotRedirecting, err := feeds.Get(redirecting.ID)
+	if err != nil {
+		t.Fatalf("Get(redirecting) error = %v", err)
+	}
+	if gotRedirecting.FeedURL != srv.URL+"/redirecting.xml" {
+		t.Errorf("redirecting feed's FeedURL changed to %q, want it kept unchanged to avoid the UNIQUE collision", gotRedirecting.FeedURL)
+	}
+	if gotRedirecting.MergeCandidateID == nil || *gotRedirecting.MergeCandidateID != existing.ID {
+		t.Errorf("redirecting.MergeCandidateID = %v, want %d", gotRedirecting.MergeCandidateID, existing.ID)
+	}
+
+	gotExisting, err := feeds.Get(existing.ID)
+	if err != nil {
+		t.Fatalf("Get(existing) error = %v", err)
+	}
+	if gotExisting.MergeCandidateID == nil || *gotExisting.MergeCandidateID != redirecting.ID {
+		t.Errorf("existing.MergeCandidateID = %v, want %d (symmetric)", gotExisting.MergeCandidateID, redirecting.ID)
+	}
+}
+
 func TestDue(t *testing.T) {
 	now := time.Now()
 

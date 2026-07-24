@@ -67,7 +67,7 @@ func TestOpenIsIdempotent(t *testing.T) {
 	if err := sqlDB2.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if count != 2 {
-		t.Errorf("schema_migrations count = %d, want 2", count)
+	if count != 3 {
+		t.Errorf("schema_migrations count = %d, want 3", count)
 	}
 }

@@ -8,8 +8,7 @@ GoRead is a lightweight, self-hosted RSS/Atom reader written in Go, for a single
 as a single executable installable via `go install`, uses SQLite as its only datastore, requires no
 authentication, and runs entirely on `localhost`. Full requirements are in `docs/spec.md`; the staged
 implementation plan is in `docs/phases.md` — check which phase is current before starting work, and implement
-phases in order. Phases 1–8 are implemented; Phase 9 (manual feed add/delete/edit-folder usability helpers) is
-next, followed by Phase 10 (feed merging for convergent-URL duplicates).
+phases in order. Phases 1–10 are implemented (all planned phases).
 
 ## Commands
 
@@ -53,6 +52,10 @@ nearest-neighbor resize to keep dependencies minimal.
     in sync with plain `INSERT`/`UPDATE`/`DELETE` triggers on `articles` and a `feeds` title-update trigger —
     **not** FTS5's special `'delete'` command, because that requires reproducing a row's exact original indexed
     values, which isn't available once a feed row is gone (e.g. mid-cascade-delete of its articles).
+  - `0003_feed_merge.sql` adds `feeds.merge_candidate_id`, a nullable self-referential FK (`ON DELETE SET NULL`)
+    that `Refresher.Refresh`'s existing `GetByURL` collision guard populates on both feeds (symmetrically) when
+    a permanent redirect converges on another feed's URL — this is what surfaces the "merge feeds" link in
+    `feed_tree.html` and what `ON DELETE SET NULL` cleans up automatically once one side of a merge is deleted.
   - `feed_repo.go` / `article_repo.go`: repository layer (CRUD) over the `feeds`/`articles` tables. Both tables
     are `STRICT`. `ArticleRepo.FindByIdentity` implements the feed-identity fallback chain from the spec
     (GUID → Link → content hash) — this is the core dedup/sync mechanism relied on by `feed.Syncer`.
@@ -65,6 +68,16 @@ nearest-neighbor resize to keep dependencies minimal.
     copies and removes it), rather than copying the on-disk `.sqlite` file directly — the latter would race the
     WAL journal (`journal_mode=WAL`, see pragmas above) and could omit committed-but-not-checkpointed data.
     Backs `GET /backup` in `internal/server`.
+  - `merge.go`: `MergeFeeds(sqlDB, survivorID, loserID)` merges two feeds flagged via `merge_candidate_id` (see
+    above) — everything runs in one transaction so a failure partway through leaves both feeds untouched. Each
+    of the loser's articles is checked against the survivor via the same GUID → Link → content hash identity
+    chain as `ArticleRepo.FindByIdentity` (reimplemented tx-scoped here, since `ArticleRepo`/`FeedRepo` operate
+    on `*sql.DB` rather than a `*sql.Tx`): a match is treated as the same underlying article (kept, marked read
+    if either copy was, the loser's copy discarded via the loser feed's cascade delete at the end); no match
+    means the article is reassigned (`UPDATE articles SET feed_id = ?`) rather than duplicated. Reassignment
+    also needs a manual `articles_fts` `feed_title` fix-up, since the `articles_fts_au` trigger (fired by that
+    `UPDATE`) only refreshes title/author/content_text, not the denormalized `feed_title` — it doesn't know
+    `feed_id` changed. Backs `GET`/`POST /feeds/{id}/merge` in `internal/server`.
 - `internal/model` — plain structs (`Feed`, `Article`, `SearchResult`) shared across the DB layer and the web
   layer.
 - `internal/browser` — `Open(url)` shells out to the OS's default-browser opener (`xdg-open`/`open`/`rundll32`)
@@ -97,6 +110,11 @@ nearest-neighbor resize to keep dependencies minimal.
       contacts a third-party host directly; responses set `Cache-Control: no-store` (images are re-fetched on
       every view, per spec).
     - `GET /backup` — forces download of a `.sqlite` snapshot via `db.Backup`, per spec ("Backups").
+    - `GET`/`POST /feeds/{id}/merge` — the "merge feeds" flow from Phase 10: `GET` shows a confirmation form
+      (`pageData.MergeActive`/`MergeFeed`/`MergeOther`, rendered by `article_list.html` in place of the article
+      list) for a feed with a non-nil `Feed.MergeCandidateID`; `POST` reads the user's chosen `survivor_id`
+      (must be `{id}` or its candidate) and calls `db.MergeFeeds`. `feed_tree.html` only shows the merge link
+      (🔗) on feeds that currently have a `MergeCandidateID`.
     Since `#app`'s `hx-boost="true"` (see below) would otherwise intercept these two file-download links as
     AJAX navigations and try to swap the raw file bytes into the page, both the OPML export and backup links in
     `feed_tree.html` carry `hx-boost="false"` so they fall through to a normal browser navigation/download

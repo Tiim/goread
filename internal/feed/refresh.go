@@ -84,8 +84,16 @@ func (r *Refresher) Refresh(ctx context.Context, feedID int64) (SyncResult, erro
 			// Another feed already uses this URL (e.g. two feeds whose
 			// permanent redirects converge on the same canonical URL).
 			// Keep this feed's original URL rather than failing every
-			// future refresh on a UNIQUE constraint violation.
+			// future refresh on a UNIQUE constraint violation, and flag both
+			// feeds as merge candidates (symmetrically, so the suggestion
+			// surfaces from whichever one the user happens to view) so the
+			// user can explicitly merge them (see db.MergeFeeds).
 			log.Printf("refresh: feed %d redirects to %s, already used by feed %d; keeping original URL", f.ID, fetched.FinalURL, existing.ID)
+			f.MergeCandidateID = &existing.ID
+			existing.MergeCandidateID = &f.ID
+			if err := r.Feeds.Update(existing); err != nil {
+				log.Printf("refresh: record merge candidate on feed %d: %v", existing.ID, err)
+			}
 		} else {
 			f.FeedURL = fetched.FinalURL
 		}

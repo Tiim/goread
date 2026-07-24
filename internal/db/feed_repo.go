@@ -44,10 +44,11 @@ func nullStringToTime(ns sql.NullString) (*time.Time, error) {
 func (r *FeedRepo) Create(f *model.Feed) error {
 	res, err := r.db.Exec(`INSERT INTO feeds (
 		title, description, feed_url, site_url, favicon, favicon_content_type, refresh_ttl_seconds,
-		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error, merge_candidate_id
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.Title, f.Description, f.FeedURL, f.SiteURL, f.Favicon, f.FaviconContentType, int64(f.RefreshTTL/time.Second),
 		f.ETag, f.LastModified, f.Folder, timeToNullString(f.LastRefreshAt), timeToNullString(f.LastSuccessAt), f.RefreshError,
+		nullableInt64(f.MergeCandidateID),
 	)
 	if err != nil {
 		return fmt.Errorf("insert feed: %w", err)
@@ -65,10 +66,11 @@ func (r *FeedRepo) Update(f *model.Feed) error {
 	res, err := r.db.Exec(`UPDATE feeds SET
 		title = ?, description = ?, feed_url = ?, site_url = ?, favicon = ?, favicon_content_type = ?,
 		refresh_ttl_seconds = ?, etag = ?, last_modified = ?, folder = ?,
-		last_refresh_at = ?, last_success_at = ?, refresh_error = ?
+		last_refresh_at = ?, last_success_at = ?, refresh_error = ?, merge_candidate_id = ?
 		WHERE id = ?`,
 		f.Title, f.Description, f.FeedURL, f.SiteURL, f.Favicon, f.FaviconContentType, int64(f.RefreshTTL/time.Second),
 		f.ETag, f.LastModified, f.Folder, timeToNullString(f.LastRefreshAt), timeToNullString(f.LastSuccessAt), f.RefreshError,
+		nullableInt64(f.MergeCandidateID),
 		f.ID,
 	)
 	if err != nil {
@@ -88,7 +90,7 @@ func (r *FeedRepo) Update(f *model.Feed) error {
 func (r *FeedRepo) Get(id int64) (*model.Feed, error) {
 	row := r.db.QueryRow(`SELECT
 		id, title, description, feed_url, site_url, favicon, favicon_content_type, refresh_ttl_seconds,
-		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error
+		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error, merge_candidate_id
 		FROM feeds WHERE id = ?`, id)
 	return scanFeed(row)
 }
@@ -97,7 +99,7 @@ func (r *FeedRepo) Get(id int64) (*model.Feed, error) {
 func (r *FeedRepo) GetByURL(feedURL string) (*model.Feed, error) {
 	row := r.db.QueryRow(`SELECT
 		id, title, description, feed_url, site_url, favicon, favicon_content_type, refresh_ttl_seconds,
-		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error
+		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error, merge_candidate_id
 		FROM feeds WHERE feed_url = ?`, feedURL)
 	return scanFeed(row)
 }
@@ -106,7 +108,7 @@ func (r *FeedRepo) GetByURL(feedURL string) (*model.Feed, error) {
 func (r *FeedRepo) List() ([]*model.Feed, error) {
 	rows, err := r.db.Query(`SELECT
 		id, title, description, feed_url, site_url, favicon, favicon_content_type, refresh_ttl_seconds,
-		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error
+		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error, merge_candidate_id
 		FROM feeds ORDER BY folder, title`)
 	if err != nil {
 		return nil, fmt.Errorf("list feeds: %w", err)
@@ -157,13 +159,17 @@ func scanFeedRow(s rowScanner) (*model.Feed, error) {
 	var f model.Feed
 	var ttlSeconds int64
 	var lastRefreshAt, lastSuccessAt sql.NullString
+	var mergeCandidateID sql.NullInt64
 	if err := s.Scan(
 		&f.ID, &f.Title, &f.Description, &f.FeedURL, &f.SiteURL, &f.Favicon, &f.FaviconContentType, &ttlSeconds,
-		&f.ETag, &f.LastModified, &f.Folder, &lastRefreshAt, &lastSuccessAt, &f.RefreshError,
+		&f.ETag, &f.LastModified, &f.Folder, &lastRefreshAt, &lastSuccessAt, &f.RefreshError, &mergeCandidateID,
 	); err != nil {
 		return nil, fmt.Errorf("scan feed: %w", err)
 	}
 	f.RefreshTTL = time.Duration(ttlSeconds) * time.Second
+	if mergeCandidateID.Valid {
+		f.MergeCandidateID = &mergeCandidateID.Int64
+	}
 
 	var err error
 	if f.LastRefreshAt, err = nullStringToTime(lastRefreshAt); err != nil {
@@ -173,4 +179,11 @@ func scanFeedRow(s rowScanner) (*model.Feed, error) {
 		return nil, fmt.Errorf("parse last_success_at: %w", err)
 	}
 	return &f, nil
+}
+
+func nullableInt64(v *int64) sql.NullInt64 {
+	if v == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: *v, Valid: true}
 }

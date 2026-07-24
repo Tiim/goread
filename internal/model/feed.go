@@ -18,4 +18,9 @@ type Feed struct {
 	LastRefreshAt      *time.Time
 	LastSuccessAt      *time.Time
 	RefreshError       string
+	// MergeCandidateID points at another feed the refresh collision guard
+	// found sharing this feed's canonical feed_url (see
+	// internal/feed/refresh.go), offered to the user as a "merge feeds"
+	// suggestion. Nil when there's no known duplicate.
+	MergeCandidateID *int64
 }

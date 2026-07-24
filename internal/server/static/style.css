@@ -162,10 +162,16 @@ button:hover {
 
 .feed-refresh,
 .feed-edit,
-.feed-delete {
+.feed-delete,
+.feed-merge {
   padding: 0.2rem 0.5rem;
   line-height: 1;
   flex-shrink: 0;
+}
+
+.merge-option {
+  display: block;
+  margin-bottom: 0.4rem;
 }
 
 .feed-edit {

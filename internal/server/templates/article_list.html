@@ -1,5 +1,27 @@
 {{define "article_list"}}
-{{if .EditFeedActive}}
+{{if .MergeActive}}
+<div class="pane-heading-row">
+  <h2 class="pane-heading">Merge duplicate feeds</h2>
+</div>
+<p class="field-hint">These two feeds' URLs converged on the same source (e.g. a permanent redirect). Pick which one to keep; its articles are combined with the other's (duplicates by GUID/link are merged rather than doubled) and the other feed is deleted.</p>
+<form class="stacked-form merge-feed-form" action="/feeds/{{.MergeFeed.ID}}/merge" method="post">
+  <fieldset>
+    <label class="merge-option">
+      <input type="radio" name="survivor_id" value="{{.MergeFeed.ID}}" checked>
+      Keep &ldquo;{{.MergeFeed.Title}}&rdquo;{{if .MergeFeed.Folder}} <span class="field-hint">({{.MergeFeed.Folder}})</span>{{end}}
+    </label>
+    <label class="merge-option">
+      <input type="radio" name="survivor_id" value="{{.MergeOther.ID}}">
+      Keep &ldquo;{{.MergeOther.Title}}&rdquo;{{if .MergeOther.Folder}} <span class="field-hint">({{.MergeOther.Folder}})</span>{{end}}
+    </label>
+  </fieldset>
+  <div class="form-actions">
+    <button type="submit">Merge feeds</button>
+    <a href="/feeds/{{.MergeFeed.ID}}">Cancel</a>
+  </div>
+</form>
+{{if .MergeError}}<p class="form-error" role="alert">{{.MergeError}}</p>{{end}}
+{{else if .EditFeedActive}}
 <div class="pane-heading-row">
   <h2 class="pane-heading">Edit {{.EditFeed.Title}}</h2>
 </div>
