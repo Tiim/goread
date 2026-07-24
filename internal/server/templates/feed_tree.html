@@ -1,0 +1,18 @@
+{{define "feed_tree"}}
+<h1 class="app-title"><a href="/">GoRead</a></h1>
+{{if not .Folders}}
+<p class="empty">No feeds yet.</p>
+{{end}}
+{{range .Folders}}
+<div class="folder">
+  <h2 class="folder-name">{{.Name}}</h2>
+  <ul class="feed-list">
+    {{range .Feeds}}
+    <li class="feed-item{{if eq .ID $.SelectedFeedID}} selected{{end}}">
+      <a href="/feeds/{{.ID}}">{{.Title}}</a>
+    </li>
+    {{end}}
+  </ul>
+</div>
+{{end}}
+{{end}}

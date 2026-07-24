@@ -1,0 +1,23 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoRead</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <nav class="pane pane-feeds" aria-label="Folders and feeds">
+    {{template "feed_tree" .}}
+  </nav>
+  <section class="pane pane-articles" aria-label="Article list">
+    {{template "article_list" .}}
+  </section>
+  <article class="pane pane-content" aria-label="Article content">
+    {{template "article_content" .}}
+  </article>
+</div>
+</body>
+</html>
+{{end}}

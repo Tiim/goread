@@ -1,0 +1,20 @@
+{{define "article_list"}}
+{{if .SelectedFeed}}
+<h2 class="pane-heading">{{.SelectedFeed.Title}}</h2>
+{{if not .Articles}}
+<p class="empty">No articles.</p>
+{{end}}
+<ul class="article-list">
+  {{range .Articles}}
+  <li class="article-item{{if eq .ID $.SelectedArticleID}} selected{{end}}{{if not .Read}} unread{{end}}">
+    <a href="/feeds/{{$.SelectedFeed.ID}}/articles/{{.ID}}">
+      <span class="article-title">{{.Title}}</span>
+      {{if .PublishedAt}}<span class="article-date">{{.PublishedAt.Format "Jan 2, 2006"}}</span>{{end}}
+    </a>
+  </li>
+  {{end}}
+</ul>
+{{else}}
+<p class="empty">Select a feed to see its articles.</p>
+{{end}}
+{{end}}

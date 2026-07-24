@@ -1,0 +1,13 @@
+{{define "article_content"}}
+{{if .SelectedArticle}}
+<h2 class="article-heading">{{.SelectedArticle.Title}}</h2>
+<p class="article-meta">
+  {{if .SelectedArticle.Author}}<span class="article-author">{{.SelectedArticle.Author}}</span>{{end}}
+  {{if .SelectedArticle.PublishedAt}}<span class="article-published">{{.SelectedArticle.PublishedAt.Format "Jan 2, 2006 15:04"}}</span>{{end}}
+</p>
+{{if .SelectedArticle.Link}}<p class="article-link"><a href="{{.SelectedArticle.Link}}" target="_blank" rel="noopener noreferrer">Open original</a></p>{{end}}
+<div class="article-body">{{.SelectedArticle.ContentText}}</div>
+{{else}}
+<p class="empty">Select an article to read it.</p>
+{{end}}
+{{end}}

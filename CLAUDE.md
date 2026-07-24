@@ -46,13 +46,24 @@ pure-Go `github.com/mmcdole/gofeed` rather than a cgo-based XML/parsing library.
     (GUID → Link → content hash) — this is the core dedup/sync mechanism and will be relied on by the Phase 2
     feed-sync logic.
 - `internal/model` — plain structs (`Feed`, `Article`) shared across the DB layer and (eventually) the web layer.
-- `internal/server` — `Listen(startPort)` binds to `localhost` starting at the given port, incrementing on
-  `EADDRINUSE` until a free port is found (per spec, GoRead must never fail to start due to a busy port 8080).
-- `internal/feed` — feed parsing and database synchronization (Phase 2):
-  - `parse.go`: `Parse([]byte) (*gofeed.Feed, error)` wraps `gofeed.Parser`, which auto-detects RSS 0.9x/1.0/2.0
-    and Atom from the document itself. This package works on already-fetched bytes; it does not perform HTTP
-    requests itself — actual fetching, HTTP caching (`ETag`/`Last-Modified`), TTL enforcement, and redirect
-    handling are Phase 3 concerns layered on top.
+- `internal/server` — HTTP server (Phase 4: `Listen` plus the read-only web UI):
+  - `listen.go`: `Listen(startPort)` binds to `localhost` starting at the given port, incrementing on
+    `EADDRINUSE` until a free port is found (per spec, GoRead must never fail to start due to a busy port 8080).
+  - `templates.go`: `go:embed`s `templates/*.html` and `static/*` (CSS) into the binary — no external files are
+    read at runtime, keeping `go install` self-contained.
+  - `templates/`: `layout.html` defines the three-pane grid (`{{template "feed_tree"}}` /
+    `"article_list"` / `"article_content"}}`), each pane its own template file so `handler.go` can reuse the
+    same `pageData` across full-page routes. Article body is rendered from `Article.ContentText` (plain text, not
+    raw HTML) since sanitization/iframe rendering of `Content` is Phase 5 — do not switch this to render raw HTML
+    before that lands.
+  - `handler.go`: `Handler.Routes()` wires `GET /`, `GET /feeds/{id}`, and `GET /feeds/{id}/articles/{articleID}` —
+    each is a full page render (no HTMX yet; that's Phase 6), sharing `render()` which always reloads the feed
+    list to rebuild the left-pane tree. `buildFolders` groups the already-`ORDER BY folder, title`-sorted feed
+    list into consecutive buckets, labeling the empty folder as "Uncategorized".
+- `internal/feed` — feed parsing, HTTP fetching, and database synchronization (Phases 2–3):
+  - `parse.go`: `Parse([]byte) (*gofeed.Feed, error)` wraps `gofeed.Parser` (with `KeepOriginalFeed: true`, so
+    `ttl.go` can reach the underlying `*rss.Feed`), which auto-detects RSS 0.9x/1.0/2.0 and Atom from the
+    document itself. This package works on already-fetched bytes; it does not perform HTTP requests itself.
   - `identity.go`: `ContentHash(link, date)` implements the third link of the spec's article identity chain
     (GUID → Link → content hash); the first two are matched directly against stored columns.
   - `convert.go`: maps a `gofeed.Item` into a `model.Article` (author resolution across `Author`/`Authors`,
@@ -63,6 +74,24 @@ pure-Go `github.com/mmcdole/gofeed` rather than a cgo-based XML/parsing library.
     state), and finally marks any previously-stored article not present in this sync as `model.ArticleStateDeleted`
     (never hard-deleted) — including resurrecting one back to `ArticleStatePresent` if it reappears in a later
     sync.
+  - `fetch.go`: `Fetcher.Fetch(ctx, feedURL, etag, lastModified)` performs the actual HTTP GET, sending
+    `If-None-Match`/`If-Modified-Since` when cache values are known. It follows redirects manually (rather than
+    via `http.Client`'s default behavior) so it can distinguish permanent (301/308) from temporary redirects —
+    only permanent ones are reported back via `FetchResult.FinalURL` for the caller to persist as the feed's new
+    URL, per spec.
+  - `ttl.go`: `TTL(*gofeed.Feed) time.Duration` resolves a feed's refresh interval — RSS's `<ttl>` element, then
+    the RSS/Atom Syndication extension (`sy:updatePeriod`/`sy:updateFrequency`), then `DefaultTTL` (60m) — always
+    floored at `MinTTL` (5m) so a misconfigured feed can't force excessive refreshing.
+  - `refresh.go`: `Refresher.Refresh(ctx, feedID)` is one full refresh cycle: conditional fetch → (on 304, just
+    update timestamps) → parse → `Syncer.Sync`, recording `ETag`/`LastModified`/`RefreshTTL` on success. Fetch and
+    parse failures are recorded as `Feed.RefreshError` and leave existing data untouched rather than being
+    returned as a Go error — a returned error means the feed itself couldn't be loaded/persisted. `Due(feed, now)`
+    decides whether a feed's `LastRefreshAt`/`RefreshTTL` mean it's due again.
+  - `scheduler.go`: `Scheduler.Run(ctx)` is the background worker — it refreshes due feeds sequentially (one at a
+    time, per spec) on a `SchedulerInterval` tick, plus an unbuffered-ish `TriggerRefresh(feedID)` channel for
+    manual/OPML-triggered refreshes. Once a single feed's `Refresh` has started it always runs to completion
+    against `context.Background()`, not `ctx` — `ctx` is only checked between feeds, so cancelling it (graceful
+    shutdown) never aborts an in-flight fetch, only stops new ones from starting.
 
 ### Key implementation details worth knowing
 

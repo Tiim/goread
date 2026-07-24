@@ -14,7 +14,11 @@ import (
 // representation. gofeed auto-detects the underlying format (RSS 0.9x/1.0/2.0
 // or Atom) from the document itself.
 func Parse(data []byte) (*gofeed.Feed, error) {
-	parsed, err := gofeed.NewParser().Parse(bytes.NewReader(data))
+	parser := gofeed.NewParser()
+	// Retains the source rss.Feed/atom.Feed on the result so TTL can inspect
+	// the RSS <ttl> element, which gofeed's universal Feed does not expose.
+	parser.KeepOriginalFeed = true
+	parsed, err := parser.Parse(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("parse feed: %w", err)
 	}
