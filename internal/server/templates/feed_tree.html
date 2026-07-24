@@ -1,5 +1,19 @@
 {{define "feed_tree"}}
 <h1 class="app-title"><a href="/">GoRead</a></h1>
+
+<form class="search-form" action="/search" role="search">
+  <input type="search" name="q" value="{{.SearchQuery}}" placeholder="Search articles" aria-label="Search articles">
+  <button type="submit">Search</button>
+</form>
+
+<div class="opml-actions">
+  <a href="/opml/export">Export OPML</a>
+  <form class="opml-import-form" action="/opml/import" method="post" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".opml,.xml" aria-label="Import OPML file">
+    <button type="submit">Import</button>
+  </form>
+</div>
+
 {{if not .Folders}}
 <p class="empty">No feeds yet.</p>
 {{end}}
@@ -10,6 +24,7 @@
     {{range .Feeds}}
     <li class="feed-item{{if eq .ID $.SelectedFeedID}} selected{{end}}">
       <a href="/feeds/{{.ID}}">
+        {{if .Favicon}}<img class="feed-favicon" src="/feeds/{{.ID}}/favicon" alt="">{{end}}
         {{.Title}}
         {{if .RefreshError}}<span class="feed-error" role="img" aria-label="Refresh failed: {{.RefreshError}}" title="Refresh failed: {{.RefreshError}}">&#9888;</span>{{end}}
       </a>

@@ -43,10 +43,10 @@ func nullStringToTime(ns sql.NullString) (*time.Time, error) {
 // Create inserts a new feed and sets its assigned ID on the passed struct.
 func (r *FeedRepo) Create(f *model.Feed) error {
 	res, err := r.db.Exec(`INSERT INTO feeds (
-		title, description, feed_url, site_url, favicon, refresh_ttl_seconds,
+		title, description, feed_url, site_url, favicon, favicon_content_type, refresh_ttl_seconds,
 		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		f.Title, f.Description, f.FeedURL, f.SiteURL, f.Favicon, int64(f.RefreshTTL/time.Second),
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.Title, f.Description, f.FeedURL, f.SiteURL, f.Favicon, f.FaviconContentType, int64(f.RefreshTTL/time.Second),
 		f.ETag, f.LastModified, f.Folder, timeToNullString(f.LastRefreshAt), timeToNullString(f.LastSuccessAt), f.RefreshError,
 	)
 	if err != nil {
@@ -63,11 +63,11 @@ func (r *FeedRepo) Create(f *model.Feed) error {
 // Update overwrites all mutable fields of an existing feed, identified by ID.
 func (r *FeedRepo) Update(f *model.Feed) error {
 	res, err := r.db.Exec(`UPDATE feeds SET
-		title = ?, description = ?, feed_url = ?, site_url = ?, favicon = ?,
+		title = ?, description = ?, feed_url = ?, site_url = ?, favicon = ?, favicon_content_type = ?,
 		refresh_ttl_seconds = ?, etag = ?, last_modified = ?, folder = ?,
 		last_refresh_at = ?, last_success_at = ?, refresh_error = ?
 		WHERE id = ?`,
-		f.Title, f.Description, f.FeedURL, f.SiteURL, f.Favicon, int64(f.RefreshTTL/time.Second),
+		f.Title, f.Description, f.FeedURL, f.SiteURL, f.Favicon, f.FaviconContentType, int64(f.RefreshTTL/time.Second),
 		f.ETag, f.LastModified, f.Folder, timeToNullString(f.LastRefreshAt), timeToNullString(f.LastSuccessAt), f.RefreshError,
 		f.ID,
 	)
@@ -87,7 +87,7 @@ func (r *FeedRepo) Update(f *model.Feed) error {
 // Get retrieves a feed by ID.
 func (r *FeedRepo) Get(id int64) (*model.Feed, error) {
 	row := r.db.QueryRow(`SELECT
-		id, title, description, feed_url, site_url, favicon, refresh_ttl_seconds,
+		id, title, description, feed_url, site_url, favicon, favicon_content_type, refresh_ttl_seconds,
 		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error
 		FROM feeds WHERE id = ?`, id)
 	return scanFeed(row)
@@ -96,7 +96,7 @@ func (r *FeedRepo) Get(id int64) (*model.Feed, error) {
 // GetByURL retrieves a feed by its feed URL.
 func (r *FeedRepo) GetByURL(feedURL string) (*model.Feed, error) {
 	row := r.db.QueryRow(`SELECT
-		id, title, description, feed_url, site_url, favicon, refresh_ttl_seconds,
+		id, title, description, feed_url, site_url, favicon, favicon_content_type, refresh_ttl_seconds,
 		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error
 		FROM feeds WHERE feed_url = ?`, feedURL)
 	return scanFeed(row)
@@ -105,7 +105,7 @@ func (r *FeedRepo) GetByURL(feedURL string) (*model.Feed, error) {
 // List returns all feeds ordered by folder then title.
 func (r *FeedRepo) List() ([]*model.Feed, error) {
 	rows, err := r.db.Query(`SELECT
-		id, title, description, feed_url, site_url, favicon, refresh_ttl_seconds,
+		id, title, description, feed_url, site_url, favicon, favicon_content_type, refresh_ttl_seconds,
 		etag, last_modified, folder, last_refresh_at, last_success_at, refresh_error
 		FROM feeds ORDER BY folder, title`)
 	if err != nil {
@@ -158,7 +158,7 @@ func scanFeedRow(s rowScanner) (*model.Feed, error) {
 	var ttlSeconds int64
 	var lastRefreshAt, lastSuccessAt sql.NullString
 	if err := s.Scan(
-		&f.ID, &f.Title, &f.Description, &f.FeedURL, &f.SiteURL, &f.Favicon, &ttlSeconds,
+		&f.ID, &f.Title, &f.Description, &f.FeedURL, &f.SiteURL, &f.Favicon, &f.FaviconContentType, &ttlSeconds,
 		&f.ETag, &f.LastModified, &f.Folder, &lastRefreshAt, &lastSuccessAt, &f.RefreshError,
 	); err != nil {
 		return nil, fmt.Errorf("scan feed: %w", err)

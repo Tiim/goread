@@ -30,3 +30,11 @@ type Article struct {
 	ContentHash string
 	Metadata    string
 }
+
+// SearchResult is a single full-text search match, pairing an article with
+// its owning feed's title (search covers feed names as well as article
+// content, per spec).
+type SearchResult struct {
+	Article   *Article
+	FeedTitle string
+}

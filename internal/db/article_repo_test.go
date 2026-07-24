@@ -192,3 +192,92 @@ func TestArticleRepo_FindByIdentityNotFound(t *testing.T) {
 		t.Errorf("FindByIdentity() error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestArticleRepo_Search(t *testing.T) {
+	sqlDB := newTestDB(t)
+	feeds := NewFeedRepo(sqlDB)
+	repo := NewArticleRepo(sqlDB)
+
+	feedA := &model.Feed{Title: "Golang Weekly", FeedURL: "https://a.example.com/feed.xml"}
+	if err := feeds.Create(feedA); err != nil {
+		t.Fatalf("create feed a: %v", err)
+	}
+	feedB := &model.Feed{Title: "Cooking Times", FeedURL: "https://b.example.com/feed.xml"}
+	if err := feeds.Create(feedB); err != nil {
+		t.Fatalf("create feed b: %v", err)
+	}
+
+	articles := []*model.Article{
+		{FeedID: feedA.ID, Title: "Understanding Goroutines", Author: "Ada", ContentText: "Concurrency in Go explained"},
+		{FeedID: feedA.ID, Title: "Pasta Recipes", Author: "Bob", ContentText: "Nothing about programming"},
+		{FeedID: feedB.ID, Title: "Weekly Roundup", Author: "Cleo", ContentText: "Mentions Golang tooling in passing"},
+	}
+	for _, a := range articles {
+		if err := repo.Create(a); err != nil {
+			t.Fatalf("create article %q: %v", a.Title, err)
+		}
+	}
+
+	t.Run("matches title and content text", func(t *testing.T) {
+		results, err := repo.Search("goroutine", 10)
+		if err != nil {
+			t.Fatalf("Search() error = %v", err)
+		}
+		if len(results) != 1 || results[0].Article.Title != "Understanding Goroutines" {
+			t.Fatalf("Search(goroutine) = %+v, want single match on Understanding Goroutines", results)
+		}
+	})
+
+	t.Run("matches feed name", func(t *testing.T) {
+		results, err := repo.Search("Cooking", 10)
+		if err != nil {
+			t.Fatalf("Search() error = %v", err)
+		}
+		if len(results) != 1 || results[0].Article.Title != "Weekly Roundup" {
+			t.Fatalf("Search(Cooking) = %+v, want single match on Weekly Roundup (via feed name)", results)
+		}
+		if results[0].FeedTitle != "Cooking Times" {
+			t.Errorf("FeedTitle = %q, want %q", results[0].FeedTitle, "Cooking Times")
+		}
+	})
+
+	t.Run("prefix matching", func(t *testing.T) {
+		results, err := repo.Search("Gol", 10)
+		if err != nil {
+			t.Fatalf("Search() error = %v", err)
+		}
+		if len(results) != 3 {
+			t.Fatalf("Search(Gol) = %d results, want 3 (2 via the \"Golang Weekly\" feed name, 1 via content text mentioning Golang)", len(results))
+		}
+	})
+
+	t.Run("empty query returns no results", func(t *testing.T) {
+		results, err := repo.Search("   ", 10)
+		if err != nil {
+			t.Fatalf("Search() error = %v", err)
+		}
+		if results != nil {
+			t.Errorf("Search(empty) = %v, want nil", results)
+		}
+	})
+
+	t.Run("special characters are escaped, not treated as FTS syntax", func(t *testing.T) {
+		if _, err := repo.Search(`"unterminated OR *`, 10); err != nil {
+			t.Errorf("Search() with FTS-special input error = %v, want no error", err)
+		}
+	})
+
+	t.Run("feed rename updates feed_title index", func(t *testing.T) {
+		feedA.Title = "Rustlang Weekly"
+		if err := feeds.Update(feedA); err != nil {
+			t.Fatalf("rename feed: %v", err)
+		}
+		results, err := repo.Search("Rustlang", 10)
+		if err != nil {
+			t.Fatalf("Search() error = %v", err)
+		}
+		if len(results) != 2 {
+			t.Fatalf("Search(Rustlang) after rename = %d results, want 2", len(results))
+		}
+	})
+}

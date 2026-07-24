@@ -3,10 +3,13 @@ package feed
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/Tiim/goread/internal/db"
+	"github.com/Tiim/goread/internal/favicon"
 	"github.com/Tiim/goread/internal/model"
+	"github.com/mmcdole/gofeed"
 )
 
 // Refresher performs a full refresh cycle for a single feed: a conditional
@@ -17,6 +20,10 @@ type Refresher struct {
 	Syncer  *Syncer
 	Feeds   *db.FeedRepo
 	Now     func() time.Time
+	// Favicon fetches and downsizes feed favicons for storage (see
+	// docs/spec.md "Favicons"). It may be nil to skip favicon fetching
+	// entirely (e.g. in tests, to keep them offline).
+	Favicon *favicon.Client
 }
 
 // NewRefresher creates a Refresher with production defaults.
@@ -26,6 +33,7 @@ func NewRefresher(feeds *db.FeedRepo, articles *db.ArticleRepo) *Refresher {
 		Syncer:  NewSyncer(feeds, articles),
 		Feeds:   feeds,
 		Now:     time.Now,
+		Favicon: favicon.New(),
 	}
 }
 
@@ -106,5 +114,43 @@ func (r *Refresher) Refresh(ctx context.Context, feedID int64) (SyncResult, erro
 	if err != nil {
 		return result, fmt.Errorf("sync feed: %w", err)
 	}
+
+	r.fetchFaviconIfMissing(ctx, feedID, parsed)
+
 	return result, nil
+}
+
+// fetchFaviconIfMissing fetches and persists a feed's favicon the first time
+// it's seen without one, following the spec's priority order (Atom <icon> /
+// RSS <image>, exposed on the parsed feed as Image.URL, falling back to
+// site_url/favicon.ico - see internal/favicon). Favicons are never
+// refetched once stored, and any fetch failure is logged and otherwise
+// ignored: it must never fail the refresh itself.
+func (r *Refresher) fetchFaviconIfMissing(ctx context.Context, feedID int64, parsed *gofeed.Feed) {
+	if r.Favicon == nil {
+		return
+	}
+	f, err := r.Feeds.Get(feedID)
+	if err != nil || len(f.Favicon) > 0 {
+		return
+	}
+
+	var candidate string
+	if parsed.Image != nil {
+		candidate = parsed.Image.URL
+	}
+	res, err := r.Favicon.Fetch(ctx, candidate, f.SiteURL)
+	if err != nil {
+		log.Printf("refresh: fetch favicon for feed %d: %v", feedID, err)
+		return
+	}
+	if res == nil {
+		return
+	}
+
+	f.Favicon = res.Data
+	f.FaviconContentType = res.ContentType
+	if err := r.Feeds.Update(f); err != nil {
+		log.Printf("refresh: persist favicon for feed %d: %v", feedID, err)
+	}
 }

@@ -8,7 +8,8 @@ GoRead is a lightweight, self-hosted RSS/Atom reader written in Go, for a single
 as a single executable installable via `go install`, uses SQLite as its only datastore, requires no
 authentication, and runs entirely on `localhost`. Full requirements are in `docs/spec.md`; the staged
 implementation plan is in `docs/phases.md` — check which phase is current before starting work, and implement
-phases in order.
+phases in order. Phases 1–7 are implemented; Phase 8 (browser auto-open, DB backup download, accessibility
+sweep, final `go install` verification) is next.
 
 ## Commands
 
@@ -22,13 +23,17 @@ go run ./cmd/goread          # run the server locally
 ```
 
 The build must stay installable with plain `go build`/`go install` — no external build system, no CGO. This is
-why the SQLite driver is the pure-Go `modernc.org/sqlite`, not `mattn/go-sqlite3`, and why feed parsing uses the
-pure-Go `github.com/mmcdole/gofeed` rather than a cgo-based XML/parsing library.
+why the SQLite driver is the pure-Go `modernc.org/sqlite` (which ships FTS5 compiled in — no build tags needed),
+not `mattn/go-sqlite3`, and why feed parsing uses the pure-Go `github.com/mmcdole/gofeed` rather than a
+cgo-based XML/parsing library. Favicon downsizing likewise avoids `golang.org/x/image` and hand-rolls a small
+nearest-neighbor resize to keep dependencies minimal.
 
 ## Architecture
 
 - `cmd/goread/main.go` — entrypoint. Wires together `appdir` (DB location) → `db.Open` (DB init/migration) →
-  `server.Listen` (port binding) → `http.Serve`.
+  `server.Listen` (port binding) → `http.Serve`, plus starting `feed.Scheduler.Run` in a goroutine and handling
+  graceful shutdown (`SIGINT`/`SIGTERM`): the HTTP server is shut down first, then `main` waits on the
+  scheduler's goroutine so an in-flight refresh finishes before the DB is closed.
 - `internal/appdir` — resolves the OS-appropriate XDG-style data directory for the SQLite file
   (`$XDG_DATA_HOME/goread` on Linux, `~/Library/Application Support/goread` on macOS,
   `%LOCALAPPDATA%\goread` on Windows), creating it if needed. Override the DB path in tests/dev via the
@@ -40,27 +45,66 @@ pure-Go `github.com/mmcdole/gofeed` rather than a cgo-based XML/parsing library.
     silently lose them on new connections, and SQLite only supports one writer at a time anyway.
   - `migrate.go`: embeds `migrations/*.sql` via `go:embed` and applies any not yet recorded in the
     `schema_migrations` table, in ascending numeric-prefix order (`0001_init.sql`, `0002_...sql`, ...). Add new
-    schema changes as new numbered files here — never edit an already-applied migration file.
+    schema changes as new numbered files here — never edit an already-applied migration file. Each migration
+    file is executed as a single multi-statement `Exec` inside a transaction, so a migration can freely mix
+    DDL, triggers, and data changes.
+  - `0002_search_favicon.sql` adds `feeds.favicon_content_type` and the `articles_fts` FTS5 virtual table
+    (title/author/content_text/feed_title) used by search. It's a regular (non-external-content) FTS5 table, kept
+    in sync with plain `INSERT`/`UPDATE`/`DELETE` triggers on `articles` and a `feeds` title-update trigger —
+    **not** FTS5's special `'delete'` command, because that requires reproducing a row's exact original indexed
+    values, which isn't available once a feed row is gone (e.g. mid-cascade-delete of its articles).
   - `feed_repo.go` / `article_repo.go`: repository layer (CRUD) over the `feeds`/`articles` tables. Both tables
     are `STRICT`. `ArticleRepo.FindByIdentity` implements the feed-identity fallback chain from the spec
-    (GUID → Link → content hash) — this is the core dedup/sync mechanism and will be relied on by the Phase 2
-    feed-sync logic.
-- `internal/model` — plain structs (`Feed`, `Article`) shared across the DB layer and (eventually) the web layer.
-- `internal/server` — HTTP server (Phase 4: `Listen` plus the read-only web UI):
+    (GUID → Link → content hash) — this is the core dedup/sync mechanism relied on by `feed.Syncer`.
+    `ArticleRepo.Search(query, limit)` queries `articles_fts` and joins back to `articles`/`feeds`;
+    `buildFTSQuery` turns free-form user input into a safe, quoted, ANDed prefix-match expression so arbitrary
+    input can never be interpreted as FTS5 query syntax. `articleSelectColumns` qualifies every column with
+    `articles.` (needed once `Search`'s join with `feeds` makes bare column names ambiguous) — keep using it
+    rather than reintroducing unqualified `SELECT id, ...` on new queries.
+- `internal/model` — plain structs (`Feed`, `Article`, `SearchResult`) shared across the DB layer and the web
+  layer.
+- `internal/server` — HTTP server and the server-rendered web UI:
   - `listen.go`: `Listen(startPort)` binds to `localhost` starting at the given port, incrementing on
     `EADDRINUSE` until a free port is found (per spec, GoRead must never fail to start due to a busy port 8080).
-  - `templates.go`: `go:embed`s `templates/*.html` and `static/*` (CSS) into the binary — no external files are
-    read at runtime, keeping `go install` self-contained.
+  - `templates.go`: `go:embed`s `templates/*.html` and `static/*` (CSS + vendored `htmx.min.js`) into the
+    binary — no external files are read at runtime, keeping `go install` self-contained.
   - `templates/`: `layout.html` defines the three-pane grid (`{{template "feed_tree"}}` /
     `"article_list"` / `"article_content"}}`), each pane its own template file so `handler.go` can reuse the
-    same `pageData` across full-page routes. Article body is rendered from `Article.ContentText` (plain text, not
-    raw HTML) since sanitization/iframe rendering of `Content` is Phase 5 — do not switch this to render raw HTML
-    before that lands.
-  - `handler.go`: `Handler.Routes()` wires `GET /`, `GET /feeds/{id}`, and `GET /feeds/{id}/articles/{articleID}` —
-    each is a full page render (no HTMX yet; that's Phase 6), sharing `render()` which always reloads the feed
-    list to rebuild the left-pane tree. `buildFolders` groups the already-`ORDER BY folder, title`-sorted feed
-    list into consecutive buckets, labeling the empty folder as "Uncategorized".
-- `internal/feed` — feed parsing, HTTP fetching, and database synchronization (Phases 2–3):
+    same `pageData` across full-page and HTMX-fragment routes. `hx-boost="true"` on the outer `#app` div turns
+    every link, and every plain or multipart `<form>`, inside it into an AJAX request that swaps `#app` — new
+    interactive UI (search box, OPML import form, refresh/read-state buttons) gets this for free without extra
+    `hx-*` attributes as long as it's a normal link/form/button inside `#app`.
+  - `article_content.html` embeds an `<iframe sandbox="">` pointing at `/feeds/{id}/articles/{id}/content`,
+    which is rendered separately (`handleArticleFrame`) with its own, even-stricter `frameCSP` — the sanitized
+    article HTML is never inlined into the main page's DOM.
+  - `handler.go` — `Handler.Routes()` wires the full page/fragment routes (`GET /`, `/feeds/{id}`,
+    `/feeds/{id}/articles/{articleID}`), read-state and manual-refresh actions, and:
+    - `GET /search` — full-text search via `ArticleRepo.Search`; results render in the article-list pane
+      (`pageData.SearchActive`/`SearchResults`) in place of a single feed's article list, since a search result
+      set spans multiple feeds.
+    - `GET /feeds/{id}/favicon` — serves the stored favicon blob (never fetches live; see `internal/feed`
+      below for when it's populated).
+    - `GET /opml/export` / `POST /opml/import` — OPML download/upload, delegating to `internal/opml` and
+      `feed.ImportOPML`.
+    - `GET /proxy/image` — routes remote article images through `internal/imageproxy` so the browser never
+      contacts a third-party host directly; responses set `Cache-Control: no-store` (images are re-fetched on
+      every view, per spec).
+    All routes share `render()`, which always reloads the feed list to rebuild the left-pane tree and picks the
+    `"layout"` (full page) vs `"app"` (fragment) template based on the `HX-Request` header. `buildFolders`
+    groups the already-`ORDER BY folder, title`-sorted feed list into consecutive buckets, labeling the empty
+    folder as "Uncategorized".
+- `internal/sanitize` — strips article HTML to a safe subset before it's rendered in the sandboxed iframe, via
+  `bluemonday.UGCPolicy()` plus a small allow-list (images, basic table attrs, nofollow/noreferrer/target=_blank
+  links). `RewriteImageSrcs` walks the sanitized HTML (using `golang.org/x/net/html`) to point every `<img src>`
+  at the local image proxy and strips `srcset`/similar attributes that could otherwise let the browser bypass it.
+- `internal/imageproxy` — fetches a single remote image per request on the server's behalf (never cached to
+  disk). `checkHost` resolves the target and rejects loopback/private/link-local/multicast addresses so
+  untrusted feed content can't use the proxy as an SSRF pivot against the local network; `NewForTesting()`
+  disables that gate so tests can point it at an `httptest` server bound to `127.0.0.1`. `internal/favicon` uses
+  the identical gating pattern independently (duplicated rather than shared, since the two packages fetch
+  different things for different reasons).
+- `internal/feed` — feed parsing, HTTP fetching, database synchronization, scheduling, favicons, and OPML
+  import:
   - `parse.go`: `Parse([]byte) (*gofeed.Feed, error)` wraps `gofeed.Parser` (with `KeepOriginalFeed: true`, so
     `ttl.go` can reach the underlying `*rss.Feed`), which auto-detects RSS 0.9x/1.0/2.0 and Atom from the
     document itself. This package works on already-fetched bytes; it does not perform HTTP requests itself.
@@ -83,15 +127,37 @@ pure-Go `github.com/mmcdole/gofeed` rather than a cgo-based XML/parsing library.
     the RSS/Atom Syndication extension (`sy:updatePeriod`/`sy:updateFrequency`), then `DefaultTTL` (60m) — always
     floored at `MinTTL` (5m) so a misconfigured feed can't force excessive refreshing.
   - `refresh.go`: `Refresher.Refresh(ctx, feedID)` is one full refresh cycle: conditional fetch → (on 304, just
-    update timestamps) → parse → `Syncer.Sync`, recording `ETag`/`LastModified`/`RefreshTTL` on success. Fetch and
-    parse failures are recorded as `Feed.RefreshError` and leave existing data untouched rather than being
-    returned as a Go error — a returned error means the feed itself couldn't be loaded/persisted. `Due(feed, now)`
-    decides whether a feed's `LastRefreshAt`/`RefreshTTL` mean it's due again.
+    update timestamps) → parse → `Syncer.Sync` → `fetchFaviconIfMissing`, recording `ETag`/`LastModified`/
+    `RefreshTTL` on success. Fetch and parse failures are recorded as `Feed.RefreshError` and leave existing
+    data untouched rather than being returned as a Go error — a returned error means the feed itself couldn't be
+    loaded/persisted. `fetchFaviconIfMissing` only runs (and only fetches) once per feed — it's a no-op once
+    `Feed.Favicon` is non-empty — trying the parsed feed's `Image.URL` (Atom `<icon>`/RSS `<image>`, per gofeed's
+    unified mapping) then falling back to `SiteURL + "/favicon.ico"` via `internal/favicon`; failures are logged
+    and never fail the refresh. `Refresher.Favicon` is `nil`-able — tests that don't want real network calls set
+    it to `nil` (see `newTestRefresher` in `refresh_test.go`) rather than using the `NewRefresher` default.
+    `Due(feed, now)` decides whether a feed's `LastRefreshAt`/`RefreshTTL` mean it's due again.
   - `scheduler.go`: `Scheduler.Run(ctx)` is the background worker — it refreshes due feeds sequentially (one at a
-    time, per spec) on a `SchedulerInterval` tick, plus an unbuffered-ish `TriggerRefresh(feedID)` channel for
-    manual/OPML-triggered refreshes. Once a single feed's `Refresh` has started it always runs to completion
-    against `context.Background()`, not `ctx` — `ctx` is only checked between feeds, so cancelling it (graceful
-    shutdown) never aborts an in-flight fetch, only stops new ones from starting.
+    time, per spec) on a `SchedulerInterval` tick, plus a `TriggerRefresh(feedID)` channel for manual/OPML-
+    triggered refreshes and a `TriggerRefreshSync(ctx, feedID)` variant that blocks until the scheduler has
+    processed it (used by the UI's manual "refresh now" button). Once a single feed's `Refresh` has started it
+    always runs to completion against `context.Background()`, not `ctx` — `ctx` is only checked between feeds,
+    so cancelling it (graceful shutdown) never aborts an in-flight fetch, only stops new ones from starting.
+  - `opml_import.go`: `ImportOPML(feeds, scheduler, r)` parses an OPML document (`internal/opml`) and, per feed
+    URL, creates a new feed or updates an existing one's title/folder/site URL, then queues each through
+    `scheduler.TriggerRefresh` for an immediate background refresh per spec ("refresh imported feeds
+    immediately") — `scheduler` may be `nil` to skip that step.
+- `internal/opml` — pure parsing/generation of OPML 2.0 documents, with no DB dependency (`Parse`/`Generate`
+  operate on `[]opml.Feed`, not `model.Feed`, so callers translate). Nested `<outline>` folder groups are
+  flattened into a single `Feed.Folder` string joined with `/`, since GoRead's schema stores folder as one flat
+  column rather than a true hierarchy; round-tripping through `Generate` preserves that flattened string as a
+  single-level outline group, not a re-nested hierarchy.
+- `internal/favicon` — fetches and downsizes a feed's favicon for storage (`Client.Fetch(ctx, candidateURL,
+  siteURL)`), trying `candidateURL` first and `siteURL + "/favicon.ico"` second; returns a `nil` `*Result` with
+  a `nil` error (not an error) when neither source yields anything, since a missing favicon isn't a failure.
+  Decodable images (PNG/JPEG/GIF — anything `image.Decode` handles) are resized to `targetSize` (32px on the
+  longest edge) and re-encoded as PNG; anything undecodable (notably classic multi-image `.ico` favicons) is
+  stored exactly as fetched, since browsers render `.ico` fine via `<img src>` and the goal is bounding storage
+  size, not universal re-encoding.
 
 ### Key implementation details worth knowing
 
@@ -101,5 +167,12 @@ pure-Go `github.com/mmcdole/gofeed` rather than a cgo-based XML/parsing library.
   tracks this, and `feed.Syncer.Sync` (see above) is what flips it.
 - `internal/db` tests spin up a real temp-file SQLite DB per test via `newTestDB(t)` (in
   `feed_repo_test.go`) rather than mocking — keep doing this for new DB-layer tests, it's what exercises the
-  PRAGMAs/FK constraints/STRICT tables for real. `internal/feed`'s sync tests follow the same pattern using the
-  exported `db.Open`.
+  PRAGMAs/FK constraints/STRICT tables/FTS5 triggers for real. `internal/feed`'s and `internal/server`'s tests
+  follow the same pattern using the exported `db.Open`.
+- Tests that exercise `feed.Refresher` construct it via `NewRefresher` and then explicitly set `.Favicon = nil`
+  (see `newTestRefresher`) to avoid making real outbound HTTP requests during `go test`; only
+  `internal/favicon`'s own tests (and one dedicated `TestRefresher_Refresh_FetchesFaviconOnce` using
+  `favicon.NewForTesting()` against an `httptest` server) exercise the real fetch path.
+- `internal/imageproxy` and `internal/favicon` each implement their own private/loopback network gate
+  (`checkHost`/`isBlockedIP`) with a `NewForTesting()` constructor that disables it — use that constructor, not
+  the real `New()`, whenever a test needs to point either client at an `httptest` server.

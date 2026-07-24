@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -454,4 +456,158 @@ func TestHandleRefreshFeed_UnknownFeedReturns404(t *testing.T) {
 
 func itoa(id int64) string {
 	return strconv.FormatInt(id, 10)
+}
+
+func TestHandleSearch_FindsMatchingArticles(t *testing.T) {
+	h, feeds, articles := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	a := &model.Article{FeedID: f.ID, Title: "Unique Searchable Title", ContentText: "body"}
+	if err := articles.Create(a); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/search?q=Searchable", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Unique Searchable Title") {
+		t.Errorf("expected matching article in results, got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleSearch_EmptyQueryShowsNoResultsBlock(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/search?q=", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "No matching articles.") {
+		t.Errorf("expected empty search results message, got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleFeedFavicon_ServesStoredBlob(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed", Favicon: []byte{1, 2, 3, 4}, FaviconContentType: "image/png"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/feeds/"+itoa(f.ID)+"/favicon", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Errorf("Content-Type = %q, want image/png", ct)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), []byte{1, 2, 3, 4}) {
+		t.Errorf("body = %v, want favicon bytes", rec.Body.Bytes())
+	}
+}
+
+func TestHandleFeedFavicon_NoFaviconReturns404(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/feeds/"+itoa(f.ID)+"/favicon", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleOPMLExport_ListsFeeds(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed", FeedURL: "https://example.com/feed.xml", Folder: "Tech"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/opml/export", nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "https://example.com/feed.xml") || !strings.Contains(body, "Tech") {
+		t.Errorf("expected exported feed URL and folder in OPML, got: %s", body)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") {
+		t.Errorf("Content-Disposition = %q, want attachment", cd)
+	}
+}
+
+func TestHandleOPMLImport_CreatesFeedFromUpload(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+
+	const doc = `<?xml version="1.0"?>
+<opml version="2.0"><head><title>t</title></head><body>
+<outline text="New" type="rss" xmlUrl="https://imported.example.com/feed.xml"/>
+</body></opml>`
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	part, err := mw.CreateFormFile("file", "subs.opml")
+	if err != nil {
+		t.Fatalf("CreateFormFile() error = %v", err)
+	}
+	if _, err := part.Write([]byte(doc)); err != nil {
+		t.Fatalf("write part: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/opml/import", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := feeds.GetByURL("https://imported.example.com/feed.xml")
+	if err != nil {
+		t.Fatalf("GetByURL() error = %v", err)
+	}
+	if got.Title != "New" {
+		t.Errorf("Title = %q, want New", got.Title)
+	}
+}
+
+func TestHandleOPMLImport_MissingFileReturns400(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/opml/import", strings.NewReader(""))
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
 }

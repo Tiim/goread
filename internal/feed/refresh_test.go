@@ -1,7 +1,10 @@
 package feed
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -9,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Tiim/goread/internal/db"
+	"github.com/Tiim/goread/internal/favicon"
 	"github.com/Tiim/goread/internal/model"
 )
 
@@ -23,7 +27,9 @@ func newTestRefresher(t *testing.T) (*Refresher, *db.FeedRepo, *db.ArticleRepo) 
 
 	feeds := db.NewFeedRepo(sqlDB)
 	articles := db.NewArticleRepo(sqlDB)
-	return NewRefresher(feeds, articles), feeds, articles
+	refresher := NewRefresher(feeds, articles)
+	refresher.Favicon = nil // keep tests offline; favicon fetching is covered by internal/favicon's own tests
+	return refresher, feeds, articles
 }
 
 const refreshFeedXML = `<?xml version="1.0"?>
@@ -246,4 +252,73 @@ func TestDue(t *testing.T) {
 			t.Error("Due() = true, want false (DefaultTTL not yet elapsed)")
 		}
 	})
+}
+
+func TestRefresher_Refresh_FetchesFaviconOnce(t *testing.T) {
+	var faviconHits int
+	iconSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		faviconHits++
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(tinyPNG(t))
+	}))
+	defer iconSrv.Close()
+
+	feedXML := `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Feed Title</title>
+    <link>https://example.com</link>
+    <description>Feed Description</description>
+    <image><url>` + iconSrv.URL + `/icon.png</url></image>
+    <item>
+      <title>Item One</title>
+      <link>https://example.com/one</link>
+      <guid>guid-1</guid>
+      <pubDate>Mon, 02 Jan 2006 15:04:05 +0000</pubDate>
+    </item>
+  </channel>
+</rss>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(feedXML))
+	}))
+	defer srv.Close()
+
+	refresher, feeds, _ := newTestRefresher(t)
+	refresher.Favicon = favicon.NewForTesting()
+	f := &model.Feed{FeedURL: srv.URL}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if _, err := refresher.Refresh(context.Background(), f.ID); err != nil {
+		t.Fatalf("Refresh() #1 error = %v", err)
+	}
+	got, err := feeds.Get(f.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if len(got.Favicon) == 0 {
+		t.Fatal("expected favicon to be fetched and stored")
+	}
+	if got.FaviconContentType != "image/png" {
+		t.Errorf("FaviconContentType = %q, want image/png", got.FaviconContentType)
+	}
+
+	if _, err := refresher.Refresh(context.Background(), f.ID); err != nil {
+		t.Fatalf("Refresh() #2 error = %v", err)
+	}
+	if faviconHits != 1 {
+		t.Errorf("favicon endpoint hit %d times, want 1 (fetched once, never refetched)", faviconHits)
+	}
+}
+
+func tinyPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode tiny png: %v", err)
+	}
+	return buf.Bytes()
 }

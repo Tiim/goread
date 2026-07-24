@@ -35,6 +35,7 @@ func TestScheduler_Run_RefreshesDueFeedsAndStopsOnCancel(t *testing.T) {
 	}
 
 	refresher := NewRefresher(feeds, articles)
+	refresher.Favicon = nil                            // keep tests offline
 	sched := NewScheduler(feeds, refresher, time.Hour) // long interval; rely on the initial refreshDue pass
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -93,6 +94,7 @@ func TestScheduler_TriggerRefresh_RunsOutOfCycle(t *testing.T) {
 	}
 
 	refresher := NewRefresher(feeds, articles)
+	refresher.Favicon = nil // keep tests offline
 	sched := NewScheduler(feeds, refresher, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -134,6 +136,7 @@ func TestScheduler_TriggerRefreshSync_BlocksUntilComplete(t *testing.T) {
 	}
 
 	refresher := NewRefresher(feeds, articles)
+	refresher.Favicon = nil // keep tests offline
 	sched := NewScheduler(feeds, refresher, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -1,5 +1,22 @@
 {{define "article_list"}}
-{{if .SelectedFeed}}
+{{if .SearchActive}}
+<div class="pane-heading-row">
+  <h2 class="pane-heading">Search: &ldquo;{{.SearchQuery}}&rdquo;</h2>
+</div>
+{{if not .SearchResults}}
+<p class="empty">No matching articles.</p>
+{{end}}
+<ul class="article-list">
+  {{range .SearchResults}}
+  <li class="article-item{{if not .Article.Read}} unread{{end}}">
+    <a href="/feeds/{{.Article.FeedID}}/articles/{{.Article.ID}}">
+      <span class="article-title">{{.Article.Title}}</span>
+      <span class="article-feed">{{.FeedTitle}}</span>
+    </a>
+  </li>
+  {{end}}
+</ul>
+{{else if .SelectedFeed}}
 <div class="pane-heading-row">
   <h2 class="pane-heading">{{.SelectedFeed.Title}}</h2>
   <button type="button" class="mark-all-read"

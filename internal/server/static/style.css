@@ -173,6 +173,65 @@ button:hover {
   font-style: italic;
 }
 
+.search-form {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.search-form input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .search-form input {
+    background: #1e1e1e;
+  }
+}
+
+.opml-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.opml-import-form {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.opml-import-form input[type="file"] {
+  max-width: 9rem;
+  font-size: 0.8rem;
+}
+
+.feed-favicon {
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
+  margin-right: 0.3rem;
+  border-radius: 2px;
+}
+
+.article-feed {
+  color: #888;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
 @media (max-width: 900px) {
   .app {
     grid-template-columns: 1fr;

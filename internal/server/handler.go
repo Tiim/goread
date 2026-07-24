@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/Tiim/goread/internal/db"
 	"github.com/Tiim/goread/internal/feed"
 	"github.com/Tiim/goread/internal/imageproxy"
 	"github.com/Tiim/goread/internal/model"
+	"github.com/Tiim/goread/internal/opml"
 	"github.com/Tiim/goread/internal/sanitize"
 )
 
@@ -67,7 +69,11 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /feeds/{id}/articles/{articleID}/read", h.handleSetArticleRead)
 	mux.HandleFunc("POST /feeds/{id}/mark-all-read", h.handleMarkAllRead)
 	mux.HandleFunc("POST /feeds/{id}/refresh", h.handleRefreshFeed)
+	mux.HandleFunc("GET /feeds/{id}/favicon", h.handleFeedFavicon)
 	mux.HandleFunc("GET /proxy/image", h.handleImageProxy)
+	mux.HandleFunc("GET /search", h.handleSearch)
+	mux.HandleFunc("GET /opml/export", h.handleOPMLExport)
+	mux.HandleFunc("POST /opml/import", h.handleOPMLImport)
 	return withCSP(mux)
 }
 
@@ -94,6 +100,13 @@ type pageData struct {
 	Articles          []*model.Article
 	SelectedArticleID int64
 	SelectedArticle   *model.Article
+	// SearchActive and SearchQuery/SearchResults are set by handleSearch;
+	// the article list pane renders SearchResults instead of Articles
+	// whenever SearchActive is true (a search spans multiple feeds, so it
+	// isn't tied to a single SelectedFeed).
+	SearchActive  bool
+	SearchQuery   string
+	SearchResults []*model.SearchResult
 }
 
 // buildFolders groups feeds (already ordered by folder, then title) into
@@ -413,6 +426,105 @@ func (h *Handler) handleImageProxy(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.Copy(w, result.Body); err != nil {
 		log.Printf("image proxy: copy response: %v", err)
 	}
+}
+
+// searchResultLimit bounds how many matches handleSearch renders.
+const searchResultLimit = 50
+
+// handleSearch performs a full-text search (title, author, content, and
+// feed name, per spec) and renders its results in place of a single feed's
+// article list. An empty/whitespace query is treated as "no search yet"
+// rather than an error.
+func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+
+	var results []*model.SearchResult
+	if strings.TrimSpace(query) != "" {
+		var err error
+		results, err = h.articles.Search(query, searchResultLimit)
+		if err != nil {
+			h.serverError(w, err)
+			return
+		}
+	}
+
+	h.render(w, r, pageData{
+		SearchActive:  true,
+		SearchQuery:   query,
+		SearchResults: results,
+	})
+}
+
+// handleFeedFavicon serves a feed's stored favicon blob. Favicons are
+// fetched once per feed by the background refresher (internal/feed) and
+// stored in the database rather than fetched live, so this never makes an
+// outbound request itself.
+func (h *Handler) handleFeedFavicon(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	f, err := h.feeds.Get(feedID)
+	if errors.Is(err, db.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	if len(f.Favicon) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	contentType := f.FaviconContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Write(f.Favicon)
+}
+
+// handleOPMLExport streams all subscriptions as a downloadable OPML
+// document, per spec ("OPML export").
+func (h *Handler) handleOPMLExport(w http.ResponseWriter, r *http.Request) {
+	feeds, err := h.feeds.List()
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	exportFeeds := make([]opml.Feed, len(feeds))
+	for i, f := range feeds {
+		exportFeeds[i] = opml.Feed{Title: f.Title, FeedURL: f.FeedURL, SiteURL: f.SiteURL, Folder: f.Folder}
+	}
+
+	w.Header().Set("Content-Type", "text/x-opml; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="goread-subscriptions.opml"`)
+	if err := opml.Generate(w, exportFeeds); err != nil {
+		log.Printf("opml export: %v", err)
+	}
+}
+
+// handleOPMLImport imports an uploaded OPML document (per spec, "OPML
+// import" - preserving folder hierarchy, updating existing feeds' metadata,
+// and triggering an immediate refresh of every imported feed), then
+// re-renders the current page.
+func (h *Handler) handleOPMLImport(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing opml file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	if _, err := feed.ImportOPML(h.feeds, h.scheduler, file); err != nil {
+		http.Error(w, "invalid opml file", http.StatusBadRequest)
+		return
+	}
+
+	h.render(w, r, pageData{})
 }
 
 // render fills in the feed tree (present on every page) and executes either
