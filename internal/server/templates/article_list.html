@@ -28,6 +28,7 @@
 <form class="stacked-form edit-feed-form" action="/feeds/{{.EditFeed.ID}}/edit" method="post">
   <p class="field-hint">Title is fetched from the feed and can't be edited here.</p>
   <label>Folder <input type="text" name="folder" value="{{.EditFeed.Folder}}"></label>
+  <label>Feed URL <input type="url" name="feed_url" value="{{.EditFeed.FeedURL}}" required></label>
   <label>Site URL <input type="url" name="site_url" value="{{.EditFeed.SiteURL}}"></label>
   <div class="form-actions">
     <button type="submit">Save</button>
@@ -55,11 +56,30 @@
 {{else if .SelectedFeed}}
 <div class="pane-heading-row">
   <h2 class="pane-heading">{{.SelectedFeed.Title}}</h2>
-  <button type="button" class="mark-all-read"
-    hx-post="/feeds/{{.SelectedFeed.ID}}/mark-all-read"
-    {{if .SelectedArticleID}}hx-vals='{"articleID": "{{.SelectedArticleID}}"}'{{end}}
-    >Mark all read</button>
+  <div class="feed-actions">
+    {{template "refresh_status" (dict "FeedID" .SelectedFeed.ID "Refreshing" .Refreshing)}}
+    <button type="button" class="feed-refresh" aria-label="Refresh {{.SelectedFeed.Title}} now"
+      hx-post="/feeds/{{.SelectedFeed.ID}}/refresh" hx-indicator="closest .feed-actions">&#8635; Refresh</button>
+    <span class="htmx-indicator manual-refresh-spinner" aria-hidden="true">&#9203;</span>
+    <a href="/feeds/{{.SelectedFeed.ID}}/edit" class="feed-edit" aria-label="Edit {{.SelectedFeed.Title}}">&#9998; Edit</a>
+    <button type="button" class="feed-delete" aria-label="Delete {{.SelectedFeed.Title}}"
+      hx-post="/feeds/{{.SelectedFeed.ID}}/delete"
+      hx-confirm="Delete feed &quot;{{.SelectedFeed.Title}}&quot;? This cannot be undone.">&#128465; Delete</button>
+    <button type="button" class="mark-all-read"
+      hx-post="/feeds/{{.SelectedFeed.ID}}/mark-all-read"
+      {{if .SelectedArticleID}}hx-vals='{"articleID": "{{.SelectedArticleID}}"}'{{end}}
+      >Mark all read</button>
+  </div>
 </div>
+<dl class="feed-meta">
+  {{if .SelectedFeed.SiteURL}}<div><dt>Site</dt><dd><a href="{{.SelectedFeed.SiteURL}}" target="_blank" rel="noopener noreferrer nofollow">{{.SelectedFeed.SiteURL}}</a></dd></div>{{end}}
+  <div><dt>Feed URL</dt><dd>{{.SelectedFeed.FeedURL}}</dd></div>
+  {{if .SelectedFeed.Folder}}<div><dt>Folder</dt><dd>{{.SelectedFeed.Folder}}</dd></div>{{end}}
+  {{if .SelectedFeed.LastRefreshAt}}<div><dt>Last refresh</dt><dd>{{.SelectedFeed.LastRefreshAt.Format "Jan 2, 2006 15:04"}}</dd></div>{{end}}
+  {{if .SelectedFeed.LastSuccessAt}}<div><dt>Last success</dt><dd>{{.SelectedFeed.LastSuccessAt.Format "Jan 2, 2006 15:04"}}</dd></div>{{end}}
+  <div><dt>Refresh interval</dt><dd>{{.SelectedFeed.RefreshTTL}}</dd></div>
+</dl>
+{{if .SelectedFeed.RefreshError}}<p class="form-error" role="alert">Refresh failed: {{.SelectedFeed.RefreshError}}</p>{{end}}
 {{if not .Articles}}
 <p class="empty">No articles.</p>
 {{end}}
@@ -77,3 +97,17 @@
 <p class="empty">Select a feed to see its articles.</p>
 {{end}}
 {{end}}
+
+{{/* refresh_status is the live "refreshing" indicator badge. htmx's SSE
+     extension (static/htmx-sse.js, enabled via hx-ext="sse" on #app in
+     layout.html) opens the connection declared by sse-connect and swaps this
+     span's content on every unnamed "message" event pushed by
+     GET /feeds/{id}/refresh-events, so the indicator reflects
+     background-scheduled refreshes too, not just ones the user triggered
+     themselves. */}}
+{{define "refresh_status"}}
+<span id="refresh-status-{{.FeedID}}" class="refresh-status"
+  sse-connect="/feeds/{{.FeedID}}/refresh-events" sse-swap="message" hx-target="this" hx-swap="innerHTML">{{template "refresh_status_content" .}}</span>
+{{end}}
+
+{{define "refresh_status_content"}}{{if .Refreshing}}<span class="spinner" role="status" aria-live="polite">Refreshing&hellip;</span>{{end}}{{end}}

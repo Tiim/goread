@@ -209,6 +209,29 @@ func (r *ArticleRepo) MarkAllReadForFeed(feedID int64) error {
 	return nil
 }
 
+// UnreadCounts returns the number of unread, still-present articles per
+// feed, keyed by feed ID. Feeds with zero unread articles are simply absent
+// from the map rather than present with a 0 value.
+func (r *ArticleRepo) UnreadCounts() (map[int64]int, error) {
+	rows, err := r.db.Query(`SELECT feed_id, COUNT(*) FROM articles
+		WHERE read = 0 AND state = ? GROUP BY feed_id`, model.ArticleStatePresent)
+	if err != nil {
+		return nil, fmt.Errorf("unread counts: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[int64]int)
+	for rows.Next() {
+		var feedID int64
+		var count int
+		if err := rows.Scan(&feedID, &count); err != nil {
+			return nil, fmt.Errorf("scan unread count: %w", err)
+		}
+		counts[feedID] = count
+	}
+	return counts, rows.Err()
+}
+
 const articleSelectColumns = `SELECT
 	articles.id, articles.feed_id, articles.guid, articles.title, articles.author,
 	articles.published_at, articles.updated_at, articles.link, articles.summary,

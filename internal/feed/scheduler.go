@@ -3,6 +3,8 @@ package feed
 import (
 	"context"
 	"log"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Tiim/goread/internal/db"
@@ -23,6 +25,49 @@ type Scheduler struct {
 	Now       func() time.Time
 
 	manual chan refreshRequest
+
+	// refreshingFeedID holds the ID of the feed currently being refreshed (0
+	// when idle), so the UI can show a live "refreshing" indicator for both
+	// manual and background-scheduled refreshes. Refreshes only ever run one
+	// at a time (see Run), so a single field suffices.
+	refreshingFeedID atomic.Int64
+
+	// changedMu/changed implement a simple broadcast-on-change signal:
+	// changed is closed (and replaced) every time refreshingFeedID changes,
+	// so any number of goroutines can wait on the channel returned by
+	// Changed() to learn "something changed" without polling, then re-check
+	// IsRefreshing and wait on the new channel. Used by the refresh-events
+	// SSE handler in internal/server.
+	changedMu sync.Mutex
+	changed   chan struct{}
+}
+
+// IsRefreshing reports whether feedID is the feed currently being refreshed.
+// Safe to call concurrently with Run.
+func (s *Scheduler) IsRefreshing(feedID int64) bool {
+	return s.refreshingFeedID.Load() == feedID
+}
+
+// Changed returns a channel that is closed the next time the currently-
+// refreshing feed changes (including going idle). Callers should re-check
+// state and call Changed() again for the next notification.
+func (s *Scheduler) Changed() <-chan struct{} {
+	s.changedMu.Lock()
+	defer s.changedMu.Unlock()
+	if s.changed == nil {
+		s.changed = make(chan struct{})
+	}
+	return s.changed
+}
+
+func (s *Scheduler) setRefreshing(feedID int64) {
+	s.refreshingFeedID.Store(feedID)
+	s.changedMu.Lock()
+	if s.changed != nil {
+		close(s.changed)
+	}
+	s.changed = make(chan struct{})
+	s.changedMu.Unlock()
 }
 
 // refreshRequest is a manually queued refresh. done, if non-nil, is closed
@@ -119,6 +164,8 @@ func (s *Scheduler) refreshDue(ctx context.Context) {
 }
 
 func (s *Scheduler) refreshOne(feedID int64) {
+	s.setRefreshing(feedID)
+	defer s.setRefreshing(0)
 	if _, err := s.Refresher.Refresh(context.Background(), feedID); err != nil {
 		log.Printf("scheduler: refresh feed %d: %v", feedID, err)
 	}

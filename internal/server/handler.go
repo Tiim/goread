@@ -83,6 +83,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /feeds/{id}/articles/{articleID}/read", h.handleSetArticleRead)
 	mux.HandleFunc("POST /feeds/{id}/mark-all-read", h.handleMarkAllRead)
 	mux.HandleFunc("POST /feeds/{id}/refresh", h.handleRefreshFeed)
+	mux.HandleFunc("GET /feeds/{id}/refresh-events", h.handleFeedRefreshEvents)
+	mux.HandleFunc("GET /feed-tree/events", h.handleFeedTreeEvents)
 	mux.HandleFunc("GET /feeds/{id}/favicon", h.handleFeedFavicon)
 	mux.HandleFunc("GET /proxy/image", h.handleImageProxy)
 	mux.HandleFunc("GET /search", h.handleSearch)
@@ -105,7 +107,13 @@ func withCSP(next http.Handler) http.Handler {
 
 type folderView struct {
 	Name  string
-	Feeds []*model.Feed
+	Feeds []feedView
+}
+
+// feedView pairs a feed with its live unread count for the sidebar tree.
+type feedView struct {
+	*model.Feed
+	UnreadCount int
 }
 
 type pageData struct {
@@ -142,11 +150,18 @@ type pageData struct {
 	MergeFeed   *model.Feed
 	MergeOther  *model.Feed
 	MergeError  string
+	// Refreshing is set by render() from the scheduler's live state whenever
+	// SelectedFeed is set — the article-list pane polls a small fragment
+	// (see handleFeedRefreshStatus) to keep this current even for
+	// background-scheduled refreshes the user didn't trigger themselves.
+	Refreshing bool
 }
 
 // buildFolders groups feeds (already ordered by folder, then title) into
-// folderView buckets, labeling feeds with no folder as "Uncategorized".
-func buildFolders(feeds []*model.Feed) []folderView {
+// folderView buckets, labeling feeds with no folder as "Uncategorized", and
+// attaches each feed's live unread count from unreadCounts (see
+// ArticleRepo.UnreadCounts).
+func buildFolders(feeds []*model.Feed, unreadCounts map[int64]int) []folderView {
 	var folders []folderView
 	for _, f := range feeds {
 		name := f.Folder
@@ -157,7 +172,7 @@ func buildFolders(feeds []*model.Feed) []folderView {
 			folders = append(folders, folderView{Name: name})
 		}
 		last := &folders[len(folders)-1]
-		last.Feeds = append(last.Feeds, f)
+		last.Feeds = append(last.Feeds, feedView{Feed: f, UnreadCount: unreadCounts[f.ID]})
 	}
 	return folders
 }
@@ -220,12 +235,16 @@ func (h *Handler) handleEditFeedForm(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUpdateFeed saves the "edit feed" form: folder/site URL are plain
-// columns, so this is a straightforward FeedRepo.Update, followed by
+// handleUpdateFeed saves the "edit feed" form: folder/site URL/feed URL are
+// plain columns, so this is a straightforward FeedRepo.Update, followed by
 // re-rendering the feed tree (buildFolders groups by the folder column at
 // render time, so a folder change is picked up immediately). Title is not
 // user-editable here — it's always sourced from the feed itself (see
-// Syncer.applyFeedMetadata, which overwrites it on every refresh anyway).
+// Syncer.applyFeedMetadata, which overwrites it on every refresh anyway). A
+// feed URL change is checked against feed_url's UNIQUE constraint up front
+// (mirroring feed.AddFeed's collision guard) so it surfaces as a form error
+// rather than a 500, and triggers an immediate refresh against the new URL
+// (same "refresh right away" treatment AddFeed/ImportOPML give a new URL).
 func (h *Handler) handleUpdateFeed(w http.ResponseWriter, r *http.Request) {
 	feedID, ok := parseID(w, r.PathValue("id"))
 	if !ok {
@@ -245,11 +264,39 @@ func (h *Handler) handleUpdateFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	feedURL := strings.TrimSpace(r.FormValue("feed_url"))
+	if feedURL == "" {
+		h.render(w, r, pageData{
+			EditFeedActive: true,
+			EditFeed:       f,
+			EditFeedError:  "feed url is required",
+		})
+		return
+	}
+	if feedURL != f.FeedURL {
+		if existing, err := h.feeds.GetByURL(feedURL); err == nil && existing.ID != f.ID {
+			h.render(w, r, pageData{
+				EditFeedActive: true,
+				EditFeed:       f,
+				EditFeedError:  "feed url already subscribed",
+			})
+			return
+		} else if err != nil && !errors.Is(err, db.ErrNotFound) {
+			h.serverError(w, err)
+			return
+		}
+	}
+	urlChanged := feedURL != f.FeedURL
+
 	f.Folder = strings.TrimSpace(r.FormValue("folder"))
 	f.SiteURL = strings.TrimSpace(r.FormValue("site_url"))
+	f.FeedURL = feedURL
 	if err := h.feeds.Update(f); err != nil {
 		h.serverError(w, err)
 		return
+	}
+	if urlChanged && h.scheduler != nil {
+		h.scheduler.TriggerRefresh(f.ID)
 	}
 
 	h.render(w, r, pageData{
@@ -589,6 +636,165 @@ func (h *Handler) handleRefreshFeed(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleFeedRefreshEvents streams the live "refreshing" indicator for a
+// single feed over Server-Sent Events: an initial event with the current
+// state, then one more each time Scheduler.Changed() reports the
+// currently-refreshing feed changed and that change affects this feedID
+// (started or stopped refreshing). htmx's SSE extension (sse-connect/
+// sse-swap in article_list.html's refresh_status template) is what opens
+// this connection and swaps the pushed HTML into the badge. This is
+// push-based rather than polled so the indicator also reflects
+// background-scheduled refreshes the user didn't trigger themselves, without
+// the client needing to guess a poll interval.
+func (h *Handler) handleFeedRefreshEvents(w http.ResponseWriter, r *http.Request) {
+	feedID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if h.scheduler == nil {
+		http.NotFound(w, r)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	writeState := func(refreshing bool) bool {
+		var buf strings.Builder
+		if err := h.templates.ExecuteTemplate(&buf, "refresh_status_content", struct {
+			FeedID     int64
+			Refreshing bool
+		}{feedID, refreshing}); err != nil {
+			log.Printf("render template: %v", err)
+			return false
+		}
+		// SSE "data:" lines can't contain raw newlines; the rendered
+		// fragment is a single inline span so collapsing them is safe.
+		payload := strings.ReplaceAll(buf.String(), "\n", "")
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	last := h.scheduler.IsRefreshing(feedID)
+	if !writeState(last) {
+		return
+	}
+
+	ctx := r.Context()
+	for {
+		changed := h.scheduler.Changed()
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+			cur := h.scheduler.IsRefreshing(feedID)
+			if cur != last {
+				last = cur
+				if !writeState(cur) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// handleFeedTreeEvents streams live per-feed unread counts for the sidebar
+// over Server-Sent Events: an initial event with the current counts, then
+// one more each time the scheduler finishes a refresh (goes from refreshing
+// some feed back to idle), since that's when a background-scheduled refresh
+// (one the user didn't trigger by navigating) may have added new unread
+// articles. htmx's SSE extension (sse-connect/sse-swap on the sr-only
+// sentinel span in feed_tree.html) receives the pushed HTML, but the payload
+// itself is the "feed_tree_folders_oob" template - an hx-swap-oob="true"
+// wrapper matching #feed-tree-folders by id - so htmx's out-of-band swap
+// updates the sidebar independently of that span's own (no-op) target; see
+// feed_tree.html's comment for why sse-connect can't live on
+// #feed-tree-folders itself. selected, read from the ?selected= query param
+// set by feed_tree.html, preserves the "currently selected feed" highlight
+// across pushed updates.
+func (h *Handler) handleFeedTreeEvents(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
+		http.NotFound(w, r)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	var selectedFeedID int64
+	if raw := r.URL.Query().Get("selected"); raw != "" {
+		selectedFeedID, _ = strconv.ParseInt(raw, 10, 64)
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	writeFolders := func() bool {
+		feeds, err := h.feeds.List()
+		if err != nil {
+			log.Printf("feed tree events: list feeds: %v", err)
+			return true
+		}
+		unreadCounts, err := h.articles.UnreadCounts()
+		if err != nil {
+			log.Printf("feed tree events: unread counts: %v", err)
+			return true
+		}
+
+		var buf strings.Builder
+		if err := h.templates.ExecuteTemplate(&buf, "feed_tree_folders_oob", struct {
+			Folders        []folderView
+			SelectedFeedID int64
+		}{buildFolders(feeds, unreadCounts), selectedFeedID}); err != nil {
+			log.Printf("render template: %v", err)
+			return false
+		}
+		// SSE "data:" lines can't contain raw newlines.
+		payload := strings.ReplaceAll(buf.String(), "\n", "")
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	if !writeFolders() {
+		return
+	}
+
+	lastIdle := h.scheduler.IsRefreshing(0)
+	ctx := r.Context()
+	for {
+		changed := h.scheduler.Changed()
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+			idle := h.scheduler.IsRefreshing(0)
+			if idle && !lastIdle {
+				if !writeFolders() {
+					return
+				}
+			}
+			lastIdle = idle
+		}
+	}
+}
+
 // articleFrameData is passed to the standalone article-frame template
 // rendered inside the sandboxed iframe.
 type articleFrameData struct {
@@ -790,7 +996,15 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 		h.serverError(w, err)
 		return
 	}
-	data.Folders = buildFolders(feeds)
+	unreadCounts, err := h.articles.UnreadCounts()
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	data.Folders = buildFolders(feeds, unreadCounts)
+	if data.SelectedFeed != nil && h.scheduler != nil {
+		data.Refreshing = h.scheduler.IsRefreshing(data.SelectedFeed.ID)
+	}
 
 	tmpl := "layout"
 	if r.Header.Get("HX-Request") == "true" {

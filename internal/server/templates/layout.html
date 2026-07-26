@@ -6,6 +6,8 @@
 <title>GoRead</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/htmx.min.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/htmx-sse.js"></script>
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to article content</a>
@@ -22,7 +24,7 @@
      see Handler.render, which picks the "app" or "layout" template
      based on the HX-Request header. */}}
 {{define "app"}}
-<div class="app" id="app" hx-boost="true" hx-target="#app" hx-swap="outerHTML" hx-push-url="true">
+<div class="app" id="app" hx-ext="sse" hx-boost="true" hx-target="#app" hx-swap="outerHTML" hx-push-url="true">
   <nav class="pane pane-feeds" aria-label="Folders and feeds">
     {{template "feed_tree" .}}
   </nav>

@@ -145,6 +145,22 @@ body {
   color: #c0392b;
 }
 
+.feed-unread-count {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0.05rem 0.4rem;
+  border-radius: 1rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--bg-muted);
+  color: var(--text-muted, inherit);
+}
+
+.feed-item.selected .feed-link .feed-unread-count {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
 button {
   font: inherit;
   color: inherit;
@@ -265,9 +281,10 @@ button:hover {
 .pane-heading-row,
 .article-heading-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
 }
 
 .article-item.unread .article-title {
@@ -277,7 +294,20 @@ button:hover {
 .article-item a {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 0.5rem;
+}
+
+.article-item {
+  margin-bottom: 0.1rem;
+}
+
+.article-item a:hover {
+  background: var(--bg-muted);
+}
+
+.article-item.selected a:hover {
+  background: var(--accent);
 }
 
 .article-date {
@@ -287,7 +317,9 @@ button:hover {
 }
 
 .pane-heading {
-  margin-top: 0;
+  margin: 0;
+  font-size: 1.25rem;
+  overflow-wrap: anywhere;
 }
 
 .article-heading {
@@ -310,6 +342,106 @@ button:hover {
 .empty {
   color: #707070;
   font-style: italic;
+}
+
+.feed-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+.feed-refresh,
+.feed-edit,
+.feed-delete,
+.mark-all-read {
+  padding: 0.25rem 0.5rem;
+  line-height: 1;
+  font-size: inherit;
+}
+
+.feed-edit {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  text-decoration: none;
+}
+
+.manual-refresh-spinner {
+  font-size: 0.9rem;
+}
+
+/* htmx normally injects this indicator CSS itself (config.includeIndicatorStyles),
+   but that injected <style> tag is blocked by pageCSP's style-src 'self' (see
+   handler.go), so it's defined here instead — see static/app.js, which turns
+   off htmx's injection attempt. */
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 200ms ease-in;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
+.refresh-status .spinner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--accent);
+}
+
+.refresh-status .spinner::before {
+  content: "";
+  width: 0.7em;
+  height: 0.7em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: refresh-spin 0.7s linear infinite;
+}
+
+@keyframes refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.feed-meta {
+  margin: 0.75rem 0 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: #555;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.6rem;
+}
+
+.feed-meta div {
+  display: contents;
+}
+
+.feed-meta dt {
+  font-weight: 600;
+  color: #707070;
+}
+
+.feed-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-color-scheme: dark) {
+  .feed-meta dt {
+    color: #999;
+  }
+  .feed-meta {
+    color: #ccc;
+  }
 }
 
 .search-form {

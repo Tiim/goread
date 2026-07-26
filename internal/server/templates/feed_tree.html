@@ -34,6 +34,35 @@
   </div>
 </details>
 
+{{/* feed-tree-folders holds the per-feed unread counts, which change
+     whenever a background-scheduled refresh finishes (not just when the
+     user navigates). The sse-connect/sse-swap attributes live on this
+     sr-only sentinel span rather than on #feed-tree-folders itself:
+     hx-target/hx-swap are inherited by descendants, and #feed-tree-folders
+     wraps the real feed-link <a> tags, so putting them there previously
+     hijacked every boosted feed-link click into swapping inside the
+     sidebar instead of navigating #app. The pushed event instead carries
+     its own hx-swap-oob="true" wrapper (see handleFeedTreeEvents /
+     "feed_tree_folders_oob") matching #feed-tree-folders by id, which
+     htmx's core out-of-band swap handles independently of this span's
+     (no-op) target. */}}
+<span class="sr-only" aria-hidden="true" sse-connect="/feed-tree/events?selected={{.SelectedFeedID}}" sse-swap="message" hx-swap="none"></span>
+<div id="feed-tree-folders">
+  {{template "feed_tree_folders" .}}
+</div>
+{{end}}
+
+{{/* feed_tree_folders_oob is what handleFeedTreeEvents actually pushes over
+     SSE: the same folder markup as feed_tree_folders, wrapped so htmx's
+     out-of-band swap matches it to #feed-tree-folders by id regardless of
+     where the triggering sse-connect element sits in the DOM. */}}
+{{define "feed_tree_folders_oob"}}
+<div id="feed-tree-folders" hx-swap-oob="true">
+  {{template "feed_tree_folders" .}}
+</div>
+{{end}}
+
+{{define "feed_tree_folders"}}
 {{if not .Folders}}
 <p class="empty">No feeds yet.</p>
 {{end}}
@@ -46,19 +75,14 @@
       <a class="feed-link" href="/feeds/{{.ID}}"{{if eq .ID $.SelectedFeedID}} aria-current="page"{{end}}>
         {{if .Favicon}}<img class="feed-favicon" src="/feeds/{{.ID}}/favicon" alt="">{{end}}
         {{.Title}}
+        {{if .UnreadCount}}<span class="feed-unread-count">{{.UnreadCount}}</span>{{end}}
         {{if .RefreshError}}<span class="feed-error" role="img" aria-label="Refresh failed: {{.RefreshError}}" title="Refresh failed: {{.RefreshError}}">&#9888;</span>{{end}}
       </a>
+      {{if .MergeCandidateID}}
       <div class="feed-item-actions">
-        <button type="button" class="feed-refresh" aria-label="Refresh {{.Title}} now"
-          hx-post="/feeds/{{.ID}}/refresh">&#8635;</button>
-        {{if .MergeCandidateID}}
         <a href="/feeds/{{.ID}}/merge" class="feed-merge" aria-label="Merge {{.Title}} with a duplicate feed" title="Possible duplicate feed found - merge?">&#128279;</a>
-        {{end}}
-        <a href="/feeds/{{.ID}}/edit" class="feed-edit" aria-label="Edit {{.Title}}">&#9998;</a>
-        <button type="button" class="feed-delete" aria-label="Delete {{.Title}}"
-          hx-post="/feeds/{{.ID}}/delete"
-          hx-confirm="Delete feed &quot;{{.Title}}&quot;? This cannot be undone.">&#128465;</button>
       </div>
+      {{end}}
     </li>
     {{end}}
   </ul>

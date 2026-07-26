@@ -718,6 +718,7 @@ func TestHandleUpdateFeed_ChangesFolderAndSiteURLNotTitle(t *testing.T) {
 
 	rec := postForm(h, "/feeds/"+strconv.FormatInt(f.ID, 10)+"/edit", url.Values{
 		"title": {"Renamed"}, "folder": {"Tech"}, "site_url": {"https://renamed.example.com"},
+		"feed_url": {"https://example.com/feed.xml"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
@@ -729,6 +730,59 @@ func TestHandleUpdateFeed_ChangesFolderAndSiteURLNotTitle(t *testing.T) {
 	}
 	if got.Title != "Original" || got.Folder != "Tech" || got.SiteURL != "https://renamed.example.com" {
 		t.Errorf("feed after update = %+v, want Title=Original (unchanged) Folder=Tech SiteURL=https://renamed.example.com", got)
+	}
+}
+
+func TestHandleUpdateFeed_ChangesFeedURL(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+	f := &model.Feed{Title: "Original", FeedURL: "https://example.com/feed.xml", Folder: "News"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+
+	rec := postForm(h, "/feeds/"+strconv.FormatInt(f.ID, 10)+"/edit", url.Values{
+		"folder": {"News"}, "feed_url": {"https://example.com/new-feed.xml"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := feeds.Get(f.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.FeedURL != "https://example.com/new-feed.xml" {
+		t.Errorf("FeedURL = %q, want https://example.com/new-feed.xml", got.FeedURL)
+	}
+}
+
+func TestHandleUpdateFeed_FeedURLCollisionShowsFormError(t *testing.T) {
+	h, feeds, _ := newTestHandler(t)
+	other := &model.Feed{Title: "Other", FeedURL: "https://example.com/other.xml"}
+	if err := feeds.Create(other); err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+	f := &model.Feed{Title: "Original", FeedURL: "https://example.com/feed.xml"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+
+	rec := postForm(h, "/feeds/"+strconv.FormatInt(f.ID, 10)+"/edit", url.Values{
+		"folder": {""}, "feed_url": {"https://example.com/other.xml"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "already subscribed") {
+		t.Errorf("body = %s, want form error mentioning already subscribed", rec.Body.String())
+	}
+
+	got, err := feeds.Get(f.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.FeedURL != "https://example.com/feed.xml" {
+		t.Errorf("FeedURL changed to %q, want unchanged", got.FeedURL)
 	}
 }
 
