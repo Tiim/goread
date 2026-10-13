@@ -45,7 +45,7 @@
 {{end}}
 <ul class="article-list">
   {{range .SearchResults}}
-  <li class="article-item{{if not .Article.Read}} unread{{end}}">
+  <li class="article-item{{if not .Article.Read}} unread{{else}} read{{end}}">
     <a href="/feeds/{{.Article.FeedID}}/articles/{{.Article.ID}}">
       <span class="article-title">{{.Article.Title}}</span>
       <span class="article-feed">{{.FeedTitle}}</span>
@@ -85,7 +85,7 @@
 {{end}}
 <ul class="article-list">
   {{range .Articles}}
-  <li class="article-item{{if eq .ID $.SelectedArticleID}} selected{{end}}{{if not .Read}} unread{{end}}">
+  <li class="article-item{{if eq .ID $.SelectedArticleID}} selected{{end}}{{if not .Read}} unread{{else}} read{{end}}">
     <a href="/feeds/{{$.SelectedFeed.ID}}/articles/{{.ID}}"{{if eq .ID $.SelectedArticleID}} aria-current="page"{{end}}>
       <span class="article-title">{{.Title}}{{if not .Read}}<span class="sr-only"> (unread)</span>{{end}}</span>
       {{if .PublishedAt}}<span class="article-date">{{.PublishedAt.Format "Jan 2, 2006"}}</span>{{end}}
