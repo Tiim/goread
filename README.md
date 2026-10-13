@@ -48,3 +48,15 @@ go run ./cmd/goread   # run the server locally
 ```
 
 See `docs/spec.md` for the full requirements specification and `docs/phases.md` for the implementation plan.
+
+### Releases
+
+CI (`.github/workflows/ci.yml`) builds, vets, checks formatting and runs the tests on every pull request and
+push to `main`. After a merge to `main` passes, [semantic-release](https://semantic-release.gitbook.io/) reads
+the new commits, picks the next version and creates a `vX.Y.Z` tag plus a GitHub release. It relies on
+[Conventional Commits](https://www.conventionalcommits.org/) in the commit messages (or squash-merge PR titles):
+
+- `fix:`, `docs:`, `chore:`, `ci:`, `build:`, `refactor:`, `style:`, `test:`, `perf:`, `revert:` → patch release
+- `feat: ...` → minor release
+- `feat!: ...` or a `BREAKING CHANGE:` footer → major release
+- commits without a conventional type prefix → no release
