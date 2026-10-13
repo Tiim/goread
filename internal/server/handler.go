@@ -114,11 +114,17 @@ type folderView struct {
 type feedView struct {
 	*model.Feed
 	UnreadCount int
+	// Refreshing is true while the scheduler is refreshing this feed, so the
+	// sidebar can show a spinner next to it.
+	Refreshing bool
 }
 
 type pageData struct {
-	Folders           []folderView
-	SelectedFeedID    int64
+	Folders        []folderView
+	SelectedFeedID int64
+	// RefreshingFeed is the feed the scheduler is currently refreshing (nil
+	// when idle), shown as a status line at the top of the sidebar tree.
+	RefreshingFeed    *model.Feed
 	SelectedFeed      *model.Feed
 	Articles          []*model.Article
 	SelectedArticleID int64
@@ -160,8 +166,9 @@ type pageData struct {
 // buildFolders groups feeds (already ordered by folder, then title) into
 // folderView buckets, labeling feeds with no folder as "Uncategorized", and
 // attaches each feed's live unread count from unreadCounts (see
-// ArticleRepo.UnreadCounts).
-func buildFolders(feeds []*model.Feed, unreadCounts map[int64]int) []folderView {
+// ArticleRepo.UnreadCounts). The feed with ID refreshingID (0 for none) is
+// flagged as currently refreshing.
+func buildFolders(feeds []*model.Feed, unreadCounts map[int64]int, refreshingID int64) []folderView {
 	var folders []folderView
 	for _, f := range feeds {
 		name := f.Folder
@@ -172,7 +179,7 @@ func buildFolders(feeds []*model.Feed, unreadCounts map[int64]int) []folderView 
 			folders = append(folders, folderView{Name: name})
 		}
 		last := &folders[len(folders)-1]
-		last.Feeds = append(last.Feeds, feedView{Feed: f, UnreadCount: unreadCounts[f.ID]})
+		last.Feeds = append(last.Feeds, feedView{Feed: f, UnreadCount: unreadCounts[f.ID], Refreshing: refreshingID != 0 && f.ID == refreshingID})
 	}
 	return folders
 }
@@ -708,12 +715,12 @@ func (h *Handler) handleFeedRefreshEvents(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// handleFeedTreeEvents streams live per-feed unread counts for the sidebar
-// over Server-Sent Events: an initial event with the current counts, then
-// one more each time the scheduler finishes a refresh (goes from refreshing
-// some feed back to idle), since that's when a background-scheduled refresh
-// (one the user didn't trigger by navigating) may have added new unread
-// articles. htmx's SSE extension (sse-connect/sse-swap on the sr-only
+// handleFeedTreeEvents streams the live sidebar state - per-feed unread
+// counts and which feed (if any) is currently refreshing - over Server-Sent
+// Events: an initial event with the current state, then one more each time
+// the scheduler starts or finishes refreshing a feed, so the sidebar shows a
+// spinner for background-scheduled refreshes too and picks up any new unread
+// articles once a refresh completes. htmx's SSE extension (sse-connect/sse-swap on the sr-only
 // sentinel span in feed_tree.html) receives the pushed HTML, but the payload
 // itself is the "feed_tree_folders_oob" template - an hx-swap-oob="true"
 // wrapper matching #feed-tree-folders by id - so htmx's out-of-band swap
@@ -743,7 +750,7 @@ func (h *Handler) handleFeedTreeEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	writeFolders := func() bool {
+	writeFolders := func(refreshingID int64) bool {
 		feeds, err := h.feeds.List()
 		if err != nil {
 			log.Printf("feed tree events: list feeds: %v", err)
@@ -759,7 +766,8 @@ func (h *Handler) handleFeedTreeEvents(w http.ResponseWriter, r *http.Request) {
 		if err := h.templates.ExecuteTemplate(&buf, "feed_tree_folders_oob", struct {
 			Folders        []folderView
 			SelectedFeedID int64
-		}{buildFolders(feeds, unreadCounts), selectedFeedID}); err != nil {
+			RefreshingFeed *model.Feed
+		}{buildFolders(feeds, unreadCounts, refreshingID), selectedFeedID, findFeed(feeds, refreshingID)}); err != nil {
 			log.Printf("render template: %v", err)
 			return false
 		}
@@ -772,25 +780,28 @@ func (h *Handler) handleFeedTreeEvents(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	if !writeFolders() {
+	ctx := r.Context()
+	// Grab the change channel before reading the state so a transition
+	// between the two can't be missed.
+	changed := h.scheduler.Changed()
+	last := h.scheduler.RefreshingFeedID()
+	if !writeFolders(last) {
 		return
 	}
 
-	lastIdle := h.scheduler.IsRefreshing(0)
-	ctx := r.Context()
 	for {
-		changed := h.scheduler.Changed()
 		select {
 		case <-ctx.Done():
 			return
 		case <-changed:
-			idle := h.scheduler.IsRefreshing(0)
-			if idle && !lastIdle {
-				if !writeFolders() {
+			changed = h.scheduler.Changed()
+			cur := h.scheduler.RefreshingFeedID()
+			if cur != last {
+				last = cur
+				if !writeFolders(cur) {
 					return
 				}
 			}
-			lastIdle = idle
 		}
 	}
 }
@@ -1001,9 +1012,14 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 		h.serverError(w, err)
 		return
 	}
-	data.Folders = buildFolders(feeds, unreadCounts)
-	if data.SelectedFeed != nil && h.scheduler != nil {
-		data.Refreshing = h.scheduler.IsRefreshing(data.SelectedFeed.ID)
+	var refreshingID int64
+	if h.scheduler != nil {
+		refreshingID = h.scheduler.RefreshingFeedID()
+	}
+	data.Folders = buildFolders(feeds, unreadCounts, refreshingID)
+	data.RefreshingFeed = findFeed(feeds, refreshingID)
+	if data.SelectedFeed != nil {
+		data.Refreshing = refreshingID != 0 && data.SelectedFeed.ID == refreshingID
 	}
 
 	tmpl := "layout"
@@ -1015,6 +1031,20 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	if err := h.templates.ExecuteTemplate(w, tmpl, data); err != nil {
 		log.Printf("render template: %v", err)
 	}
+}
+
+// findFeed returns the feed with the given ID from feeds, or nil if id is 0
+// or not present.
+func findFeed(feeds []*model.Feed, id int64) *model.Feed {
+	if id == 0 {
+		return nil
+	}
+	for _, f := range feeds {
+		if f.ID == id {
+			return f
+		}
+	}
+	return nil
 }
 
 func (h *Handler) serverError(w http.ResponseWriter, err error) {

@@ -933,3 +933,78 @@ func TestHandleMergeFeed_InvalidSurvivorIDReturns400(t *testing.T) {
 		t.Fatalf("status = %d, want 400, body: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestFeedTreeFolders_ShowsRefreshingFeed(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+
+	busy := &model.Feed{ID: 1, Title: "Busy Feed"}
+	idle := &model.Feed{ID: 2, Title: "Idle Feed"}
+	feeds := []*model.Feed{busy, idle}
+
+	var buf strings.Builder
+	if err := h.templates.ExecuteTemplate(&buf, "feed_tree_folders", struct {
+		Folders        []folderView
+		SelectedFeedID int64
+		RefreshingFeed *model.Feed
+	}{buildFolders(feeds, map[int64]int{2: 3}, busy.ID), 0, findFeed(feeds, busy.ID)}); err != nil {
+		t.Fatalf("ExecuteTemplate() error = %v", err)
+	}
+	body := buf.String()
+
+	if !strings.Contains(body, "Refreshing Busy Feed") {
+		t.Errorf("expected global refreshing status line, got: %s", body)
+	}
+	if strings.Count(body, `aria-label="Refreshing"`) != 1 {
+		t.Errorf("expected exactly one per-feed refreshing spinner, got: %s", body)
+	}
+	if !strings.Contains(body, `class="feed-item refreshing"`) {
+		t.Errorf("expected busy feed marked as refreshing, got: %s", body)
+	}
+	if !strings.Contains(body, `class="feed-item has-unread"`) {
+		t.Errorf("expected idle feed with unread articles marked has-unread, got: %s", body)
+	}
+}
+
+func TestFeedTreeFolders_IdleHasNoRefreshIndicator(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+
+	feeds := []*model.Feed{{ID: 1, Title: "Feed"}}
+	var buf strings.Builder
+	if err := h.templates.ExecuteTemplate(&buf, "feed_tree_folders", struct {
+		Folders        []folderView
+		SelectedFeedID int64
+		RefreshingFeed *model.Feed
+	}{buildFolders(feeds, nil, 0), 0, findFeed(feeds, 0)}); err != nil {
+		t.Fatalf("ExecuteTemplate() error = %v", err)
+	}
+	if body := buf.String(); strings.Contains(body, "Refreshing") {
+		t.Errorf("expected no refreshing indicator while idle, got: %s", body)
+	}
+}
+
+func TestHandleFeed_MarksReadAndUnreadArticles(t *testing.T) {
+	h, feeds, articles := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := articles.Create(&model.Article{FeedID: f.ID, Title: "Unread One"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := articles.Create(&model.Article{FeedID: f.ID, Title: "Read One", Read: true}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/feeds/"+itoa(f.ID), nil)
+	h.Routes().ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `class="article-item unread"`) {
+		t.Errorf("expected an unread article item, got: %s", body)
+	}
+	if !strings.Contains(body, `class="article-item read"`) {
+		t.Errorf("expected a read article item, got: %s", body)
+	}
+}

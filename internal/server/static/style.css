@@ -117,6 +117,48 @@ body {
 .feed-item .feed-link {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.feed-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feed-item.has-unread .feed-title {
+  font-weight: 600;
+}
+
+.feed-item.refreshing .feed-link .spinner {
+  color: var(--accent);
+}
+
+.feed-item.selected.refreshing .feed-link .spinner {
+  color: #fff;
+}
+
+.tree-refresh-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.tree-refresh-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .feed-item-actions {
@@ -152,8 +194,8 @@ body {
   border-radius: 1rem;
   font-size: 0.75rem;
   font-weight: 600;
-  background: var(--bg-muted);
-  color: var(--text-muted, inherit);
+  background: var(--accent);
+  color: #fff;
 }
 
 .feed-item.selected .feed-link .feed-unread-count {
@@ -287,8 +329,50 @@ button:hover {
   margin-bottom: 0.75rem;
 }
 
+/* Unread articles get a bold title, an accent dot and an accent left edge;
+   read ones are muted, so the two are easy to tell apart at a glance. */
+.article-item a {
+  border-left: 3px solid transparent;
+}
+
+.article-item.unread a {
+  border-left-color: var(--accent);
+}
+
 .article-item.unread .article-title {
-  font-weight: 600;
+  font-weight: 700;
+}
+
+.article-item.unread .article-title::before {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  margin-right: 0.4em;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: 0.1em;
+}
+
+.article-item.read .article-title {
+  font-weight: normal;
+  color: #707070;
+}
+
+@media (prefers-color-scheme: dark) {
+  .article-item.read .article-title {
+    color: #9a9a9a;
+  }
+}
+
+.article-item.selected .article-title,
+.article-item.selected .article-date,
+.article-item.selected .article-feed {
+  color: #fff;
+}
+
+.article-item.selected.unread .article-title::before {
+  background: #fff;
 }
 
 .article-item a {
@@ -385,7 +469,8 @@ button:hover {
   opacity: 1;
 }
 
-.refresh-status .spinner {
+.refresh-status .spinner,
+.spinner {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
@@ -393,13 +478,14 @@ button:hover {
   color: var(--accent);
 }
 
-.refresh-status .spinner::before {
+.spinner::before {
   content: "";
   width: 0.7em;
   height: 0.7em;
   border: 2px solid currentColor;
   border-right-color: transparent;
   border-radius: 50%;
+  flex-shrink: 0;
   animation: refresh-spin 0.7s linear infinite;
 }
 
@@ -486,5 +572,13 @@ button:hover {
     grid-template-columns: 1fr;
     grid-template-rows: auto auto 1fr;
     height: auto;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .tree-refresh-status,
+  .refresh-status .spinner,
+  .feed-item.refreshing .feed-link .spinner {
+    color: #6aa8ec;
   }
 }

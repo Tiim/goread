@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -66,7 +67,19 @@ func run() error {
 	}()
 
 	handler := server.NewHandler(feeds, articles, scheduler, sqlDB)
-	httpSrv := &http.Server{Handler: handler.Routes()}
+	// http.Server.Shutdown waits for active requests but never cancels their
+	// contexts, so the long-lived SSE streams (refresh-status and feed-tree
+	// events, held open by every browser tab) would otherwise keep Shutdown
+	// blocked until shutdownTimeout. Deriving every request context from
+	// baseCtx and cancelling it on shutdown lets those handlers return
+	// promptly.
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+	httpSrv := &http.Server{
+		Handler:     handler.Routes(),
+		BaseContext: func(net.Listener) context.Context { return baseCtx },
+	}
+	httpSrv.RegisterOnShutdown(cancelBase)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

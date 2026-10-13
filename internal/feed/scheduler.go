@@ -48,6 +48,12 @@ func (s *Scheduler) IsRefreshing(feedID int64) bool {
 	return s.refreshingFeedID.Load() == feedID
 }
 
+// RefreshingFeedID returns the ID of the feed currently being refreshed, or
+// 0 when the scheduler is idle. Safe to call concurrently with Run.
+func (s *Scheduler) RefreshingFeedID() int64 {
+	return s.refreshingFeedID.Load()
+}
+
 // Changed returns a channel that is closed the next time the currently-
 // refreshing feed changes (including going idle). Callers should re-check
 // state and call Changed() again for the next notification.
