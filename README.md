@@ -56,7 +56,7 @@ push to `main`. After a merge to `main` passes, [semantic-release](https://seman
 the new commits, picks the next version and creates a `vX.Y.Z` tag plus a GitHub release. It relies on
 [Conventional Commits](https://www.conventionalcommits.org/) in the commit messages (or squash-merge PR titles):
 
-- `fix: ...` → patch release
+- `fix:`, `docs:`, `chore:`, `ci:`, `build:`, `refactor:`, `style:`, `test:`, `perf:`, `revert:` → patch release
 - `feat: ...` → minor release
 - `feat!: ...` or a `BREAKING CHANGE:` footer → major release
-- anything else (`docs:`, `chore:`, `refactor:`, ...) → no release
+- commits without a conventional type prefix → no release
