@@ -43,7 +43,21 @@ func HTML(raw string) string {
 // proxy instead of letting the browser fetch them directly. sanitizedHTML
 // must already have passed through HTML.
 func RewriteImageSrcs(sanitizedHTML string, rewrite func(src string) string) (string, error) {
-	nodes, err := html.ParseFragment(strings.NewReader(sanitizedHTML), &html.Node{
+	return transform(sanitizedHTML, func(n *html.Node) { rewriteImgSrcs(n, rewrite) })
+}
+
+// RewriteLinkHrefs rewrites the href attribute of every <a> using rewrite,
+// e.g. to turn relative links into absolute ones. It's meant to run on raw
+// article HTML *before* HTML, so links that become absolute here get the
+// sanitizer's usual target/rel handling for fully qualified links.
+func RewriteLinkHrefs(rawHTML string, rewrite func(href string) string) (string, error) {
+	return transform(rawHTML, func(n *html.Node) { rewriteLinkHrefs(n, rewrite) })
+}
+
+// transform parses an HTML fragment, applies fn to each top-level node, and
+// renders the result back to a string.
+func transform(fragment string, fn func(*html.Node)) (string, error) {
+	nodes, err := html.ParseFragment(strings.NewReader(fragment), &html.Node{
 		Type:     html.ElementNode,
 		Data:     "div",
 		DataAtom: atom.Div,
@@ -53,7 +67,7 @@ func RewriteImageSrcs(sanitizedHTML string, rewrite func(src string) string) (st
 	}
 
 	for _, n := range nodes {
-		rewriteImgSrcs(n, rewrite)
+		fn(n)
 	}
 
 	var buf strings.Builder
@@ -63,6 +77,19 @@ func RewriteImageSrcs(sanitizedHTML string, rewrite func(src string) string) (st
 		}
 	}
 	return buf.String(), nil
+}
+
+func rewriteLinkHrefs(n *html.Node, rewrite func(href string) string) {
+	if n.Type == html.ElementNode && n.DataAtom == atom.A {
+		for i, attr := range n.Attr {
+			if attr.Key == "href" {
+				n.Attr[i].Val = rewrite(attr.Val)
+			}
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		rewriteLinkHrefs(c, rewrite)
+	}
 }
 
 func rewriteImgSrcs(n *html.Node, rewrite func(src string) string) {

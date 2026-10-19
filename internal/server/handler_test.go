@@ -223,6 +223,45 @@ func TestHandleArticleFrame_ResolvesRelativeImageURLs(t *testing.T) {
 	}
 }
 
+func TestHandleArticleFrame_ResolvesRelativeLinks(t *testing.T) {
+	h, feeds, articles := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed", FeedURL: "https://feeds.example.com/rss"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	a := &model.Article{
+		FeedID:  f.ID,
+		Title:   "Links",
+		Link:    "https://blog.example.com/posts/hello/",
+		Content: `<a href="other-post/">one</a> <a href="/about">two</a> <a href="https://x.example.com/">three</a> <a href="mailto:me@example.com">four</a>`,
+	}
+	if err := articles.Create(a); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/feeds/"+itoa(f.ID)+"/articles/"+itoa(a.ID)+"/content", nil)
+	h.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`href="https://blog.example.com/posts/hello/other-post/"`,
+		`href="https://blog.example.com/about"`,
+		`href="https://x.example.com/"`,
+		`href="mailto:me@example.com"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %s, got: %s", want, body)
+		}
+	}
+	if strings.Count(body, `target="_blank"`) < 3 {
+		t.Errorf("expected resolved links to open in a new tab, got: %s", body)
+	}
+}
+
 func TestHandleArticleFrame_MismatchedFeedReturns404(t *testing.T) {
 	h, feeds, articles := newTestHandler(t)
 

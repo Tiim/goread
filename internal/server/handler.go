@@ -840,10 +840,17 @@ func (h *Handler) handleArticleFrame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	base := h.imageBaseURL(article)
-	safe := sanitize.HTML(article.Content)
+	base := h.contentBaseURL(article)
+	resolved, err := sanitize.RewriteLinkHrefs(article.Content, func(href string) string {
+		return resolveURL(base, href)
+	})
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	safe := sanitize.HTML(resolved)
 	safe, err = sanitize.RewriteImageSrcs(safe, func(src string) string {
-		return proxyImageURL(resolveImageURL(base, src))
+		return proxyImageURL(resolveURL(base, src))
 	})
 	if err != nil {
 		h.serverError(w, err)
@@ -857,11 +864,11 @@ func (h *Handler) handleArticleFrame(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// imageBaseURL picks the URL that relative image srcs in an article (e.g.
-// "cat.png" or "/img/cat.png") are resolved against: the article's own link
+// contentBaseURL picks the URL that relative image srcs and link hrefs in an
+// article (e.g. "cat.png" or "/img/cat.png") are resolved against: the article's own link
 // first, then the feed's site URL, then the feed URL itself. Returns nil if
 // none of them is an absolute http(s) URL.
-func (h *Handler) imageBaseURL(article *model.Article) *url.URL {
+func (h *Handler) contentBaseURL(article *model.Article) *url.URL {
 	candidates := []string{article.Link}
 	if f, err := h.feeds.Get(article.FeedID); err == nil {
 		candidates = append(candidates, f.SiteURL, f.FeedURL)
@@ -875,10 +882,10 @@ func (h *Handler) imageBaseURL(article *model.Article) *url.URL {
 	return nil
 }
 
-// resolveImageURL turns a possibly relative image src into an absolute URL
-// using base. src is returned unchanged if it's already absolute, can't be
+// resolveURL turns a possibly relative image src or link href into an
+// absolute URL using base. It's returned unchanged if it's already absolute, can't be
 // parsed, or there's no base to resolve it against.
-func resolveImageURL(base *url.URL, src string) string {
+func resolveURL(base *url.URL, src string) string {
 	if base == nil {
 		return src
 	}
