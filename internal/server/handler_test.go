@@ -175,6 +175,54 @@ func TestHandleArticleFrame_SanitizesContentAndProxiesImages(t *testing.T) {
 	}
 }
 
+func TestHandleArticleFrame_ResolvesRelativeImageURLs(t *testing.T) {
+	h, feeds, articles := newTestHandler(t)
+
+	f := &model.Feed{Title: "My Feed", FeedURL: "https://feeds.example.com/rss", SiteURL: "https://site.example.com/"}
+	if err := feeds.Create(f); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	withLink := &model.Article{
+		FeedID:  f.ID,
+		Title:   "With link",
+		Link:    "https://blog.example.com/posts/hello/",
+		Content: `<img src="my-image.jpg"><img src="/static/my-img.png"><img src="//cdn.example.com/x.png"><img src="https://other.example.com/abs.png">`,
+	}
+	noLink := &model.Article{FeedID: f.ID, Title: "No link", GUID: "g2", Content: `<img src="img/a.png">`}
+	for _, a := range []*model.Article{withLink, noLink} {
+		if err := articles.Create(a); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+	}
+
+	get := func(a *model.Article) string {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/feeds/"+itoa(f.ID)+"/articles/"+itoa(a.ID)+"/content", nil)
+		h.Routes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	body := get(withLink)
+	for _, want := range []string{
+		"https://blog.example.com/posts/hello/my-image.jpg",
+		"https://blog.example.com/static/my-img.png",
+		"https://cdn.example.com/x.png",
+		"https://other.example.com/abs.png",
+	} {
+		if !strings.Contains(body, proxyImageURL(want)) {
+			t.Errorf("expected proxied %q, got: %s", want, body)
+		}
+	}
+
+	body = get(noLink)
+	if want := proxyImageURL("https://site.example.com/img/a.png"); !strings.Contains(body, want) {
+		t.Errorf("expected fallback to site URL %q, got: %s", want, body)
+	}
+}
+
 func TestHandleArticleFrame_MismatchedFeedReturns404(t *testing.T) {
 	h, feeds, articles := newTestHandler(t)
 
