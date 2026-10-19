@@ -840,8 +840,18 @@ func (h *Handler) handleArticleFrame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	safe := sanitize.HTML(article.Content)
-	safe, err = sanitize.RewriteImageSrcs(safe, proxyImageURL)
+	base := h.contentBaseURL(article)
+	resolved, err := sanitize.RewriteLinkHrefs(article.Content, func(href string) string {
+		return resolveURL(base, href)
+	})
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	safe := sanitize.HTML(resolved)
+	safe, err = sanitize.RewriteImageSrcs(safe, func(src string) string {
+		return proxyImageURL(resolveURL(base, src))
+	})
 	if err != nil {
 		h.serverError(w, err)
 		return
@@ -852,6 +862,38 @@ func (h *Handler) handleArticleFrame(w http.ResponseWriter, r *http.Request) {
 	if err := h.templates.ExecuteTemplate(w, "article_frame", articleFrameData{ContentHTML: template.HTML(safe)}); err != nil {
 		log.Printf("render article frame: %v", err)
 	}
+}
+
+// contentBaseURL picks the URL that relative image srcs and link hrefs in an
+// article (e.g. "cat.png" or "/img/cat.png") are resolved against: the article's own link
+// first, then the feed's site URL, then the feed URL itself. Returns nil if
+// none of them is an absolute http(s) URL.
+func (h *Handler) contentBaseURL(article *model.Article) *url.URL {
+	candidates := []string{article.Link}
+	if f, err := h.feeds.Get(article.FeedID); err == nil {
+		candidates = append(candidates, f.SiteURL, f.FeedURL)
+	}
+	for _, c := range candidates {
+		u, err := url.Parse(strings.TrimSpace(c))
+		if err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+			return u
+		}
+	}
+	return nil
+}
+
+// resolveURL turns a possibly relative image src or link href into an
+// absolute URL using base. It's returned unchanged if it's already absolute, can't be
+// parsed, or there's no base to resolve it against.
+func resolveURL(base *url.URL, src string) string {
+	if base == nil {
+		return src
+	}
+	ref, err := url.Parse(strings.TrimSpace(src))
+	if err != nil || ref.IsAbs() {
+		return src
+	}
+	return base.ResolveReference(ref).String()
 }
 
 // proxyImageURL rewrites a (possibly remote) image src into a same-origin
