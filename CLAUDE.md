@@ -27,6 +27,21 @@ not `mattn/go-sqlite3`, and why feed parsing uses the pure-Go `github.com/mmcdol
 cgo-based XML/parsing library. Favicon downsizing likewise avoids `golang.org/x/image` and hand-rolls a small
 nearest-neighbor resize to keep dependencies minimal.
 
+## Commits and pull requests
+
+Commit messages and PR titles **must** follow the [Conventional Commits](https://www.conventionalcommits.org/)
+("semantic commit") format: `<type>(<optional scope>): <description>`, e.g. `fix(server): resolve relative image
+URLs` or `feat: add OPML export`. Releases are cut automatically by semantic-release on `main` (see
+`.releaserc.json` and `.github/workflows/ci.yml`), which reads these messages to decide the next version, so a
+non-conforming message is silently left out of the release.
+
+- Allowed types: `feat` (minor release), `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`,
+  `style`, `revert` (all patch releases).
+- Breaking changes: add `!` after the type/scope (`feat!: ...`) or a `BREAKING CHANGE:` footer — this triggers a
+  major release.
+- Use the imperative mood and a lowercase description, with no trailing period.
+- PR titles matter as much as commit messages: a squash-merged PR's title becomes the commit on `main`.
+
 ## Architecture
 
 - `cmd/goread/main.go` — entrypoint. Wires together `appdir` (DB location) → `db.Open` (DB init/migration) →
